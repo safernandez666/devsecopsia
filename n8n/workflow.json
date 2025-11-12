@@ -1,0 +1,389 @@
+{
+  "name": "GitLab DevOps AI Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "gitlab-ai",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "2ffef090-8e76-4d55-9e91-406a86f1a2a6",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        -784,
+        192
+      ],
+      "webhookId": "gitlab-ai-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalizar estructura del webhook\nconst input = $input.first().json;\n\n// Algunos webhooks vienen con .body, otros directamente\nconst data = input.body || input;\n\nreturn [{\n  json: data\n}];"
+      },
+      "id": "d785a9a1-43e7-496e-b463-af488b285d6f",
+      "name": "Normalize Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -624,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.object_attributes.status }}",
+              "operation": "notEqual",
+              "value2": "pending"
+            },
+            {
+              "value1": "={{ $json.object_attributes.status }}",
+              "operation": "notEqual",
+              "value2": "running"
+            }
+          ]
+        }
+      },
+      "id": "9a4a4eb4-fec1-4260-b0ad-7aac262ab546",
+      "name": "Pipeline Finished?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -432,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.object_attributes.status }}",
+              "value2": "failed"
+            }
+          ]
+        }
+      },
+      "id": "b0450b48-7ce0-4118-8a1d-2242c15bfa54",
+      "name": "Pipeline Failed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -208,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://gitlab-server:8000/api/v4/projects/{{ $json.project.id }}/pipelines/{{ $json.object_attributes.id }}/jobs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "83233a21-9d83-4dc3-a5bc-111354921b4c",
+      "name": "Get Jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HuuD98t7B5PbZAHf",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Obtener todos los jobs\nconst jobs = $input.all();\n\nconsole.log('📊 Total jobs received:', jobs.length);\n\n// Log de todos los jobs para debugging\njobs.forEach(j => {\n  console.log(`  - Job #${j.json.id}: ${j.json.name} | Status: ${j.json.status} | Stage: ${j.json.stage}`);\n});\n\n// Filtrar SOLO jobs con status 'failed'\nconst failedJobs = jobs.filter(job => job.json.status === 'failed');\n\nconsole.log(`\\n🔍 Jobs with status 'failed': ${failedJobs.length}`);\n\nif (failedJobs.length === 0) {\n  console.error('❌ NO FAILED JOBS FOUND');\n  throw new Error('No failed jobs found in pipeline. All jobs either passed, were skipped, or are still running.');\n}\n\n// Ordenar por ID descendente (más reciente primero)\nfailedJobs.sort((a, b) => b.json.id - a.json.id);\n\nconst selectedJob = failedJobs[0].json;\nconsole.log(`\\n✅ SELECTED JOB:`);\nconsole.log(`   ID: ${selectedJob.id}`);\nconsole.log(`   Name: ${selectedJob.name}`);\nconsole.log(`   Status: ${selectedJob.status}`);\nconsole.log(`   Stage: ${selectedJob.stage}`);\nconsole.log(`   Failure Reason: ${selectedJob.failure_reason || 'Not specified'}`);\n\nreturn [{ json: selectedJob }];"
+      },
+      "id": "54feb2ca-ccdf-490a-82ef-50085e4011b8",
+      "name": "Get Failed Job",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://gitlab-server:8000/api/v4/projects/{{ $node[\"Normalize Data\"].json[\"project\"][\"id\"] }}/jobs/{{ $node[\"Get Failed Job\"].json[\"id\"] }}/trace\n",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {}
+          }
+        }
+      },
+      "id": "d7debd81-8fe0-462e-b7a4-c7c08e252cde",
+      "name": "Get Job Logs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        432,
+        0
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "HuuD98t7B5PbZAHf",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://192.168.0.12:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$json[\"body\"]}}",
+        "options": {}
+      },
+      "id": "a4f700ca-a35e-42ea-8537-6b69b5b89571",
+      "name": "Analyze with Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        816,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// --- 1️⃣ Obtener salida de Ollama ---\nconst input = $input.first().json;\nconst ollamaResponse = Array.isArray(input)\n  ? input[0]\n  : input.body?.[0] || input;\n\nconst analysis = ollamaResponse.response || ollamaResponse.output || \"(sin respuesta del modelo)\";\n\n// --- 2️⃣ Obtener datos del pipeline (Uso seguro de $items) ---\n// Usamos el operador ternario para asegurar que si $items falla, webhookData sea un objeto vacío {}\nconst webhookData = $items('Normalize Data').length > 0\n    ? $items('Normalize Data')[0].json \n    : {}; // <--- Esto evita el ReferenceError\n\n// --- 3️⃣ Obtener datos del job fallido (Uso seguro de $items) ---\nconst failedJobData = $items('Get Failed Job').length > 0\n    ? $items('Get Failed Job')[0].json \n    : {}; // <--- Esto evita el ReferenceError\n\n\n// --- 4️⃣ Construir el mensaje de texto formateado (Opción 1 del paso anterior) ---\nconst messageText = `\n*🚨 Pipeline Fallido en GitLab*\n\n*📦 Proyecto:* ${webhookData.project?.name || 'N/A'}\n*🌿 Rama:* ${webhookData.object_attributes?.ref || 'N/A'}\n*🧩 Job Fallido:* ${failedJobData.name || 'N/A'} (${failedJobData.stage || 'N/A'})\n*⏱️ Duración:* ${failedJobData.duration ? failedJobData.duration + 's' : 'N/A'}\n*🔗 Enlaces:* <${webhookData.object_attributes?.url || '#'}|Ver Pipeline> • <${failedJobData.web_url || '#'}|Ver Job>\n\n---\n*🤖 Análisis AI*\n${analysis}\n`;\n\n\n// --- 5️⃣ Formatear salida ---\nreturn [{\n  json: {\n    success: true,\n    pipeline: {\n      id: webhookData.object_attributes?.id,\n      project: webhookData.project?.name,\n      branch: webhookData.object_attributes?.ref,\n      commit: webhookData.object_attributes?.sha?.substring(0, 8),\n      url: webhookData.object_attributes?.url,\n      status: webhookData.object_attributes?.status\n    },\n    failed_job: {\n      id: failedJobData.id,\n      name: failedJobData.name,\n      stage: failedJobData.stage,\n      url: failedJobData.web_url,\n      duration: failedJobData.duration\n    },\n    ai_analysis: analysis,\n    timestamp: new Date().toISOString(),\n    // Usamos el texto para el mensaje de Slack (como decidimos)\n    slack_text_content: messageText \n  }\n}];"
+      },
+      "id": "73bfdb67-6d6f-4755-939e-6ceb1118250f",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst successMessage = `\n*✅ Pipeline Exitoso en GitLab*\n\n*📦 Proyecto:* ${data.project?.name || 'N/A'}\n*🌿 Rama:* ${data.object_attributes?.ref || 'N/A'}\n*⏱️ Duración:* ${data.object_attributes?.duration || 'N/A'}s\n*🔗 Ver Pipeline:* ${data.object_attributes?.url || '#'}\n\n*📊 Jobs completados:*\n${data.builds?.filter(b => b.status === 'success').map(b => `  • ${b.name} (${b.duration}s)`).join('\\n') || 'N/A'}\n`;\n\nreturn [{\n  json: {\n    slack_text_content: successMessage\n  }\n}];"
+      },
+      "id": "1fd8a25b-4a57-4d4a-be4d-c68f9612bb32",
+      "name": "Pipeline Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ignorar eventos de pipeline todavía en ejecución\nconst data = $input.first().json;\n\nreturn [{\n  json: {\n    ignored: true,\n    message: \"Pipeline still running, ignoring event\",\n    status: data.object_attributes.status,\n    pipeline_id: data.object_attributes.id\n  }\n}];"
+      },
+      "id": "27bffdc0-10e4-4484-a9f5-af81f27beee6",
+      "name": "Ignore Running",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validar que hay datos antes de procesar\nconst input = $json;\n\n// Si no hay data, es porque el job no tiene logs\nif (!input.data || input.data.trim() === '') {\n  console.log('⚠️ No logs available for this job');\n  return [{\n    json: {\n      body: {\n        model: \"mistral:7b-instruct\",\n        prompt: \"El job falló pero no tiene logs disponibles. Esto puede ocurrir si el job fue cancelado o no se ejecutó.\",\n        stream: false,\n        options: { temperature: 0.2, top_p: 0.9 }\n      }\n    }\n  }];\n}\n\n// Limpia caracteres ANSI del log (colores de terminal)\nconst cleanLog = input.data.replace(/\\u001b\\[[0-9;]*m/g, '');\n\n// Crea el cuerpo JSON que Ollama espera\nconst body = {\n  model: \"mistral:7b-instruct\",\n  prompt: `Eres un experto en Python y CI/CD. Analiza este error de pipeline y proporciona:\n\n📋 RESUMEN (1-2 líneas): ¿Qué falló?\n\n🔍 CAUSA RAÍZ: ¿Por qué falló exactamente?\n\n📂 ARCHIVO(S) AFECTADO(S): Lista los archivos y líneas específicas con errores\n\n✅ SOLUCIÓN: Proporciona el código completo corregido del archivo afectado\n\nLog del error:\n---\n${cleanLog}\n---\nResponde en formato claro, estructurado y profesional.`,\n  stream: false,\n  options: { temperature: 0.2, top_p: 0.9 }\n};\n\nreturn [{ json: { body } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        0
+      ],
+      "id": "aa4e8459-db9e-4fec-a2c3-5b8f9e48f64c",
+      "name": "Prepare Ollama JSON"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "=C09RAN56Y92"
+        },
+        "text": "={{ $json.slack_text_content }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1296,
+        192
+      ],
+      "id": "8aa2d93b-5980-42bf-a334-63cdee79612d",
+      "name": "Send a message",
+      "webhookId": "50a51d59-30c3-4052-ab32-e6d65939a749",
+      "credentials": {
+        "slackApi": {
+          "id": "xHMoUydfsqX5Xfy3",
+          "name": "Slack account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Data": {
+      "main": [
+        [
+          {
+            "node": "Pipeline Finished?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pipeline Finished?": {
+      "main": [
+        [
+          {
+            "node": "Pipeline Failed?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore Running",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pipeline Failed?": {
+      "main": [
+        [
+          {
+            "node": "Get Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pipeline Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Jobs": {
+      "main": [
+        [
+          {
+            "node": "Get Failed Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Failed Job": {
+      "main": [
+        [
+          {
+            "node": "Get Job Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Job Logs": {
+      "main": [
+        [
+          {
+            "node": "Prepare Ollama JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze with Ollama": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Ollama JSON": {
+      "main": [
+        [
+          {
+            "node": "Analyze with Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Response": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pipeline Success": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "3bb06672-c783-46fe-9f89-845752b1bcb4",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "1ea78f3ac16b70e14c67c87e2e615896b4dff59b50c40ef98fe04823b8b5e1a8"
+  },
+  "id": "zGAE8wvd2YNun5ut",
+  "tags": []
+}

@@ -1,0 +1,176 @@
+services:
+
+  gitlab-server:
+    image: 'gitlab/gitlab-ce:latest'
+    container_name: gitlab-server
+    environment:
+      GITLAB_ROOT_EMAIL: "sfernandez@local"
+      GITLAB_ROOT_PASSWORD: "Marte2000"
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://localhost:8000'
+        nginx['listen_port'] = 8000    
+        
+        # new changes for enabling container registry
+        gitlab_rails['registry_enabled'] = true
+
+        # docker CLI from inside the pipeline's job will use this URL to push docker images
+        registry_external_url 'http://localhost:5001'
+    ports:
+      - '8000:8000'
+
+      # expose new port for registry hosting
+      - '5001:5001'
+    volumes:
+      - ./gitlab/config:/etc/gitlab
+      - ./gitlab/data:/var/opt/gitlab
+
+  gitlab-runner:
+    image: gitlab/gitlab-runner:alpine
+    container_name: gitlab-runner
+    network_mode: 'host'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # n8n
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=admin123
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://n8n:5678/
+      - GENERIC_TIMEZONE=America/Argentina/Buenos_Aires
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n
+      - DB_POSTGRESDB_PASSWORD=n8n123
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=168
+    ports:
+      - '5678:5678'
+    volumes:
+      - n8n-data:/home/node/.n8n
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres-n8n
+    environment:
+      - POSTGRES_USER=n8n
+      - POSTGRES_PASSWORD=n8n123
+      - POSTGRES_DB=n8n
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=50"
+      - "-c"
+      - "shared_buffers=128MB"
+      - "-c"
+      - "effective_cache_size=512MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "wal_buffers=4MB"
+      - "-c"
+      - "default_statistics_target=100"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+      - "-c"
+      - "work_mem=2621kB"
+      - "-c"
+      - "min_wal_size=1GB"
+      - "-c"
+      - "max_wal_size=4GB"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+# DefectDojo - Security Vulnerability Management
+  defectdojo-nginx:
+    image: defectdojo/defectdojo-nginx:latest
+    container_name: defectdojo-nginx
+    depends_on:
+      - uwsgi
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  uwsgi:
+    image: defectdojo/defectdojo-django:latest
+    container_name: defectdojo-uwsgi
+    environment:
+      DD_DATABASE_URL: postgresql://defectdojo:defectdojo@postgres-defectdojo:5432/defectdojo
+      DD_SECRET_KEY: ChangeMe123SecretKey456
+      DD_ADMIN_USER: admin
+      DD_ADMIN_PASSWORD: admin123
+      DD_ADMIN_MAIL: admin@defectdojo.local
+      DD_ALLOWED_HOSTS: "*"
+    depends_on:
+      - postgres-defectdojo
+    restart: unless-stopped
+
+  celerybeat:
+    image: defectdojo/defectdojo-django:latest
+    container_name: defectdojo-celerybeat
+    command: ["/wait-for-it.sh", "postgres-defectdojo:5432", "--", "/app/docker/entrypoint-celery-beat.sh"]
+    environment:
+      DD_DATABASE_URL: postgresql://defectdojo:defectdojo@postgres-defectdojo:5432/defectdojo
+      DD_SECRET_KEY: ChangeMe123SecretKey456
+    depends_on:
+      - postgres-defectdojo
+      - rabbitmq
+    restart: unless-stopped
+
+  celeryworker:
+    image: defectdojo/defectdojo-django:latest
+    container_name: defectdojo-celeryworker
+    command: ["/wait-for-it.sh", "postgres-defectdojo:5432", "--", "/app/docker/entrypoint-celery-worker.sh"]
+    environment:
+      DD_DATABASE_URL: postgresql://defectdojo:defectdojo@postgres-defectdojo:5432/defectdojo
+      DD_SECRET_KEY: ChangeMe123SecretKey456
+    depends_on:
+      - postgres-defectdojo
+      - rabbitmq
+    restart: unless-stopped
+
+  postgres-defectdojo:
+    image: postgres:15-alpine
+    container_name: postgres-defectdojo
+    environment:
+      POSTGRES_USER: defectdojo
+      POSTGRES_PASSWORD: defectdojo
+      POSTGRES_DB: defectdojo
+    volumes:
+      - defectdojo-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-alpine
+    container_name: defectdojo-rabbitmq
+    restart: unless-stopped
+
+volumes:
+  n8n-data:
+  postgres-data:
+  defectdojo-data:
