@@ -18,18 +18,11 @@ build:
   variables:
     DOCKER_HOST: unix:///var/run/docker.sock
   before_script:
-    - |
-      echo "🔍 Configurando Docker..."
-      mkdir -p ~/.docker
-      cat > ~/.docker/config.json << EOF
-      {
-        "insecure-registries": ["localhost:5001"]
-      }
-      EOF
-    - echo "🔐 Logging into GitLab registry..."
-    - docker login localhost:5001 -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+    - docker info
     - echo "🔐 Logging into Docker Hub..."
     - echo "$DOCKERHUB_PASSWORD" | docker login -u $DOCKERHUB_USERNAME --password-stdin
+    - echo "🔐 Logging into GitLab registry..."
+    - docker login localhost:5001 -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
   script:
     - echo "🏗️ Building image with CI variables..."
     - cd app
@@ -44,14 +37,14 @@ build:
         --build-arg CI_COMMIT_AUTHOR="${CI_COMMIT_AUTHOR}" \
         -t "$REGISTRY_IMAGE:${CI_COMMIT_SHA:0:8}" \
         -t "$REGISTRY_IMAGE:latest" \
+        -t "safernandez666/python-application:${CI_COMMIT_SHA:0:8}" \
+        -t "safernandez666/python-application:latest" \
         .
     - cd ..
     - echo "📤 Pushing to GitLab registry..."
     - docker push "$REGISTRY_IMAGE:${CI_COMMIT_SHA:0:8}"
     - docker push "$REGISTRY_IMAGE:latest"
     - echo "📤 Pushing to Docker Hub..."
-    - docker tag "$REGISTRY_IMAGE:latest" "safernandez666/python-application:${CI_COMMIT_SHA:0:8}"
-    - docker tag "$REGISTRY_IMAGE:latest" "safernandez666/python-application:latest"
     - docker push "safernandez666/python-application:${CI_COMMIT_SHA:0:8}"
     - docker push "safernandez666/python-application:latest"
     - echo "✅ Build complete!"
@@ -59,7 +52,7 @@ build:
     - echo "📦 Docker Hub - safernandez666/python-application:${CI_COMMIT_SHA:0:8}"
   only:
     - master
-
+ 
 bandit-scan:
   stage: security
   image: python:3.9-slim
