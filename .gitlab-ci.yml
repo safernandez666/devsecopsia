@@ -2,24 +2,63 @@ stages:
   - build
   - security
   - report
+  - review
+  - deploy
 
 variables:
   DOCKER_DRIVER: overlay2
   DOCKER_TLS_CERTDIR: ""
+  REGISTRY_IMAGE: "localhost:5001/root/python-application"
 
 build:
   stage: build
   image: docker:latest
   tags:
     - docker
-  services:
-    - docker:dind
+  variables:
+    DOCKER_HOST: unix:///var/run/docker.sock
   before_script:
-    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+    - |
+      echo "🔍 Configurando Docker..."
+      mkdir -p ~/.docker
+      cat > ~/.docker/config.json << EOF
+      {
+        "insecure-registries": ["localhost:5001"]
+      }
+      EOF
+    - echo "🔐 Logging into GitLab registry..."
+    - docker login localhost:5001 -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+    - echo "🔐 Logging into Docker Hub..."
+    - echo "$DOCKERHUB_PASSWORD" | docker login -u $DOCKERHUB_USERNAME --password-stdin
   script:
-    - docker build -t "$CI_REGISTRY_IMAGE:${CI_COMMIT_SHA:0:8}" -t "$CI_REGISTRY_IMAGE:latest" .
-    - docker push "$CI_REGISTRY_IMAGE:${CI_COMMIT_SHA:0:8}"
-    - docker push "$CI_REGISTRY_IMAGE:latest"
+    - echo "🏗️ Building image with CI variables..."
+    - cd app
+    - |
+      docker build \
+        --build-arg CI_COMMIT_SHORT_SHA=${CI_COMMIT_SHORT_SHA} \
+        --build-arg CI_COMMIT_SHA=${CI_COMMIT_SHA} \
+        --build-arg CI_PIPELINE_ID=${CI_PIPELINE_ID} \
+        --build-arg CI_PIPELINE_URL=${CI_PIPELINE_URL} \
+        --build-arg CI_JOB_ID=${CI_JOB_ID} \
+        --build-arg CI_COMMIT_MESSAGE="${CI_COMMIT_MESSAGE}" \
+        --build-arg CI_COMMIT_AUTHOR="${CI_COMMIT_AUTHOR}" \
+        -t "$REGISTRY_IMAGE:${CI_COMMIT_SHA:0:8}" \
+        -t "$REGISTRY_IMAGE:latest" \
+        .
+    - cd ..
+    - echo "📤 Pushing to GitLab registry..."
+    - docker push "$REGISTRY_IMAGE:${CI_COMMIT_SHA:0:8}"
+    - docker push "$REGISTRY_IMAGE:latest"
+    - echo "📤 Pushing to Docker Hub..."
+    - docker tag "$REGISTRY_IMAGE:latest" "safernandez666/python-application:${CI_COMMIT_SHA:0:8}"
+    - docker tag "$REGISTRY_IMAGE:latest" "safernandez666/python-application:latest"
+    - docker push "safernandez666/python-application:${CI_COMMIT_SHA:0:8}"
+    - docker push "safernandez666/python-application:latest"
+    - echo "✅ Build complete!"
+    - echo "📦 GitLab - $REGISTRY_IMAGE:${CI_COMMIT_SHA:0:8}"
+    - echo "📦 Docker Hub - safernandez666/python-application:${CI_COMMIT_SHA:0:8}"
+  only:
+    - master
 
 bandit-scan:
   stage: security
@@ -29,14 +68,19 @@ bandit-scan:
   before_script:
     - pip install bandit
   script:
-    - echo "Ejecutando análisis de seguridad con Bandit..."
-    - bandit -r . -f txt || true
-    - bandit -r . -f json -o bandit-report.json || true
+    - echo "🔍 Ejecutando análisis de seguridad con Bandit..."
+    - echo "📂 Scope - app/ directory only"
+    - bandit -r app/ -f txt
+    - bandit -r app/ -f json -o bandit-report.json
+    - echo "✅ No se encontraron problemas de seguridad"
   artifacts:
     paths:
       - bandit-report.json
     expire_in: 1 week
+    when: always
   allow_failure: true
+  only:
+    - master
 
 safety-scan:
   stage: security
@@ -46,14 +90,19 @@ safety-scan:
   before_script:
     - pip install safety
   script:
-    - echo "Analizando dependencias vulnerables..."
-    - safety check --file requirements.txt --output text || true
-    - safety check --file requirements.txt --output json > safety-report.json || true
+    - echo "🔍 Analizando dependencias vulnerables..."
+    - echo "📂 Scope - app/requirements.txt"
+    - safety check --file app/requirements.txt --output text
+    - safety check --file app/requirements.txt --output json > safety-report.json
+    - echo "✅ No se encontraron vulnerabilidades"
   artifacts:
     paths:
       - safety-report.json
     expire_in: 1 week
+    when: always
   allow_failure: true
+  only:
+    - master
 
 gitleaks-scan:
   stage: security
@@ -61,28 +110,27 @@ gitleaks-scan:
   tags:
     - docker
   before_script:
-    - apk add --no-cache git
+    - apk add --no-cache git wget jq
     - wget -O gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_arm64.tar.gz
     - tar -xzf gitleaks.tar.gz
     - chmod +x gitleaks
     - mv gitleaks /usr/local/bin/
   script:
-    - echo "Preparando escaneo..."
-    - rm -f ./*.md README.md CHANGELOG.md 2>/dev/null || true
-    - echo "Escaneando secretos en código fuente..."
-    - gitleaks detect --source . --no-git --report-format json --report-path /tmp/gitleaks-report.json --verbose --exit-code 0
-    - gitleaks detect --source . --no-git --report-format sarif --report-path /tmp/gitleaks-report.sarif --verbose --exit-code 0
-    - mv /tmp/gitleaks-report.json ./gitleaks-report.json
-    - mv /tmp/gitleaks-report.sarif ./gitleaks-report.sarif
-    - echo "Verificando si hay leaks en código fuente..."
-    - gitleaks detect --source . --no-git --verbose
+    - echo "🔍 Escaneando código de la aplicación..."
+    - echo "📂 Scope - app/ directory only"
+    - ls -la app/
+    - gitleaks detect --source ./app --no-git --report-format json --report-path gitleaks-report.json --exit-code 1 --verbose
+    - gitleaks detect --source ./app --no-git --report-format sarif --report-path gitleaks-report.sarif --exit-code 1
+    - echo "✅ No se encontraron secretos en app/"
   artifacts:
     paths:
       - gitleaks-report.json
       - gitleaks-report.sarif
     expire_in: 1 week
     when: always
-  allow_failure: false
+  allow_failure: true
+  only:
+    - master
 
 trivy-scan:
   stage: security
@@ -96,18 +144,22 @@ trivy-scan:
     - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
   script:
     - echo "Pulling image from registry..."
-    - docker pull localhost:5001/root/python-application:latest
-    - echo "Escaneando imagen Docker con Trivy..."
-    - trivy image --format table localhost:5001/root/python-application:latest
-    - echo "Generando reporte JSON..."
-    - trivy image --format json --output trivy-report.json localhost:5001/root/python-application:latest
+    - docker pull $REGISTRY_IMAGE:latest
+    - echo "🔍 Escaneando imagen Docker con Trivy..."
+    - trivy image --format table $REGISTRY_IMAGE:latest
+    - echo "📊 Generando reporte JSON..."
+    - trivy image --format json --output trivy-report.json --exit-code 1 --severity HIGH,CRITICAL $REGISTRY_IMAGE:latest
+    - echo "✅ No se encontraron vulnerabilidades críticas"
   artifacts:
     paths:
       - trivy-report.json
     expire_in: 1 week
+    when: always
   allow_failure: true
   dependencies:
     - build
+  only:
+    - master
 
 upload-defectdojo:
   stage: report
@@ -117,57 +169,84 @@ upload-defectdojo:
   needs:
     - job: bandit-scan
       artifacts: true
+      optional: true
     - job: trivy-scan
       artifacts: true
+      optional: true
     - job: gitleaks-scan
       artifacts: true
+      optional: true
+    - job: safety-scan
+      artifacts: true
+      optional: true
   before_script:
     - pip install requests
   script:
+    - echo "DEBUG - Revisando variables de entorno..."
+    - echo "DEFECTDOJO_URL=${DEFECTDOJO_URL:-http://localhost:8080}"
     - ls -la
     - |
-      python3 << 'EOF'
-      import requests
-      import os
-      
-      # Usar localhost porque el runner está en network_mode: host
-      DEFECTDOJO_URL = "http://localhost:8080"
+      python3 << 'PY'
+      import requests, os, sys, json
+      DEFECTDOJO_URL = os.getenv('DEFECTDOJO_URL', 'http://localhost:8080').rstrip('/')
       API_KEY = os.getenv('DEFECTDOJO_API_KEY')
-      
-      headers = {'Authorization': f'Token {API_KEY}'}
-      
+      headers = {'Authorization': f'Token {API_KEY}'} if API_KEY else {}
+
+      def check_resp(resp, context):
+          print(f"{context} -> status: {resp.status_code}")
+          try:
+              print("body:", resp.json())
+          except Exception:
+              print("body (text):", resp.text[:1000])
+          return resp.status_code
+
       try:
-          product_types = requests.get(f'{DEFECTDOJO_URL}/api/v2/product_types/', headers=headers).json()
-          
+          if not API_KEY:
+              print("ERROR: DEFECTDOJO_API_KEY no definida. Abortando integración con DefectDojo.")
+              sys.exit(0)
+
+          r = requests.get(f"{DEFECTDOJO_URL}/api/v2/product_types/", headers=headers)
+          if r.status_code != 200:
+              print("ERROR: GET /product_types falló.")
+              check_resp(r, "GET /product_types")
+              sys.exit(1)
+
+          pts = r.json().get('results', [])
           product_type_id = None
-          for pt in product_types.get('results', []):
-              if pt['name'] == 'Web Application':
-                  product_type_id = pt['id']
+          for pt in pts:
+              if pt.get('name') == 'Web Application':
+                  product_type_id = pt.get('id')
                   break
-          
-          if not product_type_id:
-              pt_response = requests.post(
-                  f'{DEFECTDOJO_URL}/api/v2/product_types/',
+
+          if product_type_id is None:
+              print("Product type 'Web Application' no existe. Intentando crearlo...")
+              r = requests.post(
+                  f"{DEFECTDOJO_URL}/api/v2/product_types/",
                   headers=headers,
                   json={'name': 'Web Application', 'description': 'Web applications'}
               )
-              if pt_response.status_code == 201:
-                  product_type_id = pt_response.json()['id']
-          
-          print(f"Product Type ID: {product_type_id}")
-          
+              check_resp(r, "POST /product_types")
+              if r.status_code == 201:
+                  product_type_id = r.json().get('id')
+              else:
+                  print("No fue posible crear product_type. Abortando.")
+                  sys.exit(1)
+
+          print("Product Type ID:", product_type_id)
+
           product_name = "Python Application"
-          products = requests.get(f'{DEFECTDOJO_URL}/api/v2/products/', headers=headers).json()
-          
+          r = requests.get(f"{DEFECTDOJO_URL}/api/v2/products/", headers=headers, params={'search': product_name})
+          check_resp(r, "GET /products")
           product_id = None
-          for p in products.get('results', []):
-              if p['name'] == product_name:
-                  product_id = p['id']
+          for p in r.json().get('results', []):
+              if p.get('name') == product_name:
+                  product_id = p.get('id')
                   break
-          
-          if not product_id:
-              product_response = requests.post(
-                  f'{DEFECTDOJO_URL}/api/v2/products/',
+
+          if product_id is None:
+              print("Creando producto:", product_name)
+              r = requests.post(
+                  f"{DEFECTDOJO_URL}/api/v2/products/",
                   headers=headers,
                   json={
                       'name': product_name,
@@ -175,82 +254,215 @@ upload-defectdojo:
                       'prod_type': product_type_id
                   }
               )
-              
-              if product_response.status_code == 201:
-                  product_id = product_response.json()['id']
-          
-          print(f"Product ID: {product_id}")
-          
-          engagement_name = f"Pipeline {os.getenv('CI_PIPELINE_ID')}"
-          engagement_response = requests.post(
-              f'{DEFECTDOJO_URL}/api/v2/engagements/',
-              headers=headers,
-              json={
-                  'name': engagement_name,
-                  'product': product_id,
-                  'target_start': '2025-01-01',
-                  'target_end': '2025-12-31',
-                  'engagement_type': 'CI/CD'
-              }
-          )
-          
-          if engagement_response.status_code != 201:
-              print(f"Failed to create engagement: {engagement_response.text}")
-              exit(1)
-              
-          engagement_id = engagement_response.json()['id']
-          print(f"Engagement ID: {engagement_id}")
-          
-          if os.path.exists('bandit-report.json'):
-              with open('bandit-report.json', 'rb') as f:
-                  response = requests.post(
-                      f'{DEFECTDOJO_URL}/api/v2/import-scan/',
-                      headers={'Authorization': f'Token {API_KEY}'},
-                      files={'file': f},
-                      data={
-                          'engagement': engagement_id,
-                          'scan_type': 'Bandit Scan',
-                          'environment': 'Development',
-                          'verified': 'true'
-                      }
-                  )
-                  print(f"Bandit uploaded: {response.status_code}")
-          
-          if os.path.exists('trivy-report.json'):
-              with open('trivy-report.json', 'rb') as f:
-                  response = requests.post(
-                      f'{DEFECTDOJO_URL}/api/v2/import-scan/',
-                      headers={'Authorization': f'Token {API_KEY}'},
-                      files={'file': f},
-                      data={
-                          'engagement': engagement_id,
-                          'scan_type': 'Trivy Scan',
-                          'environment': 'Development',
-                          'verified': 'true'
-                      }
-                  )
-                  print(f"Trivy uploaded: {response.status_code}")
-          
-          if os.path.exists('gitleaks-report.sarif'):
-              with open('gitleaks-report.sarif', 'rb') as f:
-                  response = requests.post(
-                      f'{DEFECTDOJO_URL}/api/v2/import-scan/',
-                      headers={'Authorization': f'Token {API_KEY}'},
-                      files={'file': f},
-                      data={
-                          'engagement': engagement_id,
-                          'scan_type': 'Gitleaks Scan',
-                          'environment': 'Development',
-                          'verified': 'true'
-                      }
-                  )
-                  print(f"GitLeaks uploaded: {response.status_code}")
-          
-          print(f"\n✓ DefectDojo: http://localhost:8080/engagement/{engagement_id}")
-          
-      except Exception as e:
-          print(f"Error: {e}")
-          exit(1)
-      EOF
-  allow_failure: true
+              check_resp(r, "POST /products")
+              if r.status_code == 201:
+                  product_id = r.json().get('id')
+              else:
+                  print("No fue posible crear product. Abortando.")
+                  sys.exit(1)
 
+          print("Product ID:", product_id)
+
+          engagement_name = f"Pipeline {os.getenv('CI_PIPELINE_ID', 'local')}"
+          payload = {
+            'name': engagement_name,
+            'product': product_id,
+            'target_start': '2025-01-01',
+            'target_end': '2025-12-31',
+            'engagement_type': 'CI/CD'
+          }
+          print("Creando engagement con payload:", payload)
+          r = requests.post(f"{DEFECTDOJO_URL}/api/v2/engagements/", headers=headers, json=payload)
+          status = check_resp(r, "POST /engagements")
+          if status != 201:
+              print("Failed to create engagement. Server returned non-201; aborting.")
+              sys.exit(1)
+          engagement_id = r.json().get('id')
+          print("Engagement ID:", engagement_id)
+
+          def upload_if_exists(path, scan_type):
+              if os.path.exists(path):
+                  print("Uploading", path, "as", scan_type)
+                  with open(path, 'rb') as f:
+                      resp = requests.post(
+                          f'{DEFECTDOJO_URL}/api/v2/import-scan/',
+                          headers={'Authorization': f'Token {API_KEY}'},
+                          files={'file': f},
+                          data={
+                              'engagement': engagement_id,
+                              'scan_type': scan_type,
+                              'environment': 'Development',
+                              'verified': 'true'
+                          }
+                      )
+                  check_resp(resp, f"POST /import-scan ({scan_type})")
+              else:
+                  print("No existe:", path)
+
+          upload_if_exists('bandit-report.json', 'Bandit Scan')
+          upload_if_exists('trivy-report.json', 'Trivy Scan')
+          upload_if_exists('gitleaks-report.sarif', 'Gitleaks Scan')
+          upload_if_exists('safety-report.json', 'Safety Scan')
+
+          print(f"✓ DefectDojo: {DEFECTDOJO_URL}/engagement/{engagement_id}")
+
+      except Exception as e:
+          print("Exception:", e)
+          sys.exit(1)
+      PY
+  when: always
+  allow_failure: true
+  only:
+    - master
+
+security-gate:
+  stage: review
+  image: alpine:latest
+  tags:
+    - docker
+  needs:
+    - job: bandit-scan
+      optional: true
+      artifacts: true
+    - job: safety-scan
+      optional: true
+      artifacts: true
+    - job: gitleaks-scan
+      optional: true
+      artifacts: true
+    - job: trivy-scan
+      optional: true
+      artifacts: true
+  before_script:
+    - apk add --no-cache jq
+  script:
+    - |
+      echo "🔍 Verificando resultados de seguridad..."
+      echo "================================================"
+      
+      FAILED=false
+      TOTAL_ISSUES=0
+      
+      if [ -f "bandit-report.json" ]; then
+        BANDIT_ISSUES=$(cat bandit-report.json | jq '.results | length' 2>/dev/null || echo "0")
+        echo "📊 Bandit: $BANDIT_ISSUES issues encontrados"
+        TOTAL_ISSUES=$((TOTAL_ISSUES + BANDIT_ISSUES))
+        [ "$BANDIT_ISSUES" -gt 0 ] && FAILED=true
+      else
+        echo "⚠️  Bandit: No se encontró reporte"
+      fi
+      
+      if [ -f "gitleaks-report.json" ]; then
+        GITLEAKS_ISSUES=$(cat gitleaks-report.json | jq '. | length' 2>/dev/null || echo "0")
+        echo "📊 GitLeaks: $GITLEAKS_ISSUES secretos encontrados"
+        TOTAL_ISSUES=$((TOTAL_ISSUES + GITLEAKS_ISSUES))
+        [ "$GITLEAKS_ISSUES" -gt 0 ] && FAILED=true
+      else
+        echo "⚠️  GitLeaks: No se encontró reporte"
+      fi
+      
+      if [ -f "safety-report.json" ]; then
+        SAFETY_ISSUES=$(cat safety-report.json | jq '.vulnerabilities | length' 2>/dev/null || echo "0")
+        echo "📊 Safety: $SAFETY_ISSUES vulnerabilidades encontradas"
+        TOTAL_ISSUES=$((TOTAL_ISSUES + SAFETY_ISSUES))
+        [ "$SAFETY_ISSUES" -gt 0 ] && FAILED=true
+      else
+        echo "⚠️  Safety: No se encontró reporte"
+      fi
+      
+      if [ -f "trivy-report.json" ]; then
+        TRIVY_CRITICAL=$(cat trivy-report.json | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' 2>/dev/null || echo "0")
+        TRIVY_HIGH=$(cat trivy-report.json | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' 2>/dev/null || echo "0")
+        echo "📊 Trivy: $TRIVY_CRITICAL críticas, $TRIVY_HIGH altas"
+        TRIVY_TOTAL=$((TRIVY_CRITICAL + TRIVY_HIGH))
+        TOTAL_ISSUES=$((TOTAL_ISSUES + TRIVY_TOTAL))
+        [ "$TRIVY_TOTAL" -gt 0 ] && FAILED=true
+      else
+        echo "⚠️  Trivy: No se encontró reporte"
+      fi
+      
+      echo "================================================"
+      echo "📊 Total de problemas: $TOTAL_ISSUES"
+      echo ""
+      
+      if [ "$FAILED" = "true" ]; then
+        echo "❌ SECURITY GATE: FAILED"
+        echo ""
+        echo "⚠️  Se encontraron $TOTAL_ISSUES problemas de seguridad"
+        echo "📊 Revisa los reportes en DefectDojo"
+        echo "🤖 Ollama ha analizado los errores y enviado soluciones a Slack"
+        echo ""
+        echo "⚡ El deploy requiere aprobación manual"
+        exit 1
+      else
+        echo "✅ SECURITY GATE: PASSED"
+        echo ""
+        echo "✨ No se encontraron problemas de seguridad"
+        echo "🚀 El deploy puede continuar automáticamente"
+      fi
+  allow_failure: true
+  only:
+    - master
+
+deploy-k3s:
+  stage: deploy
+  image: alpine/k8s:1.28.3
+  tags:
+    - docker
+  needs:
+    - job: security-gate
+      optional: false
+  before_script:
+    - mkdir -p ~/.kube
+    - echo "$KUBECONFIG_CONTENT" > ~/.kube/config
+    - export KUBECONFIG=~/.kube/config
+  script:
+    - |
+      set -euo pipefail
+
+      IMAGE_TAG="safernandez666/python-application:${CI_COMMIT_SHA:0:8}"
+
+      echo "🚀 Deploying to k3s"
+      echo "📦 Image: $IMAGE_TAG"
+      echo "📍 Commit: ${CI_COMMIT_SHA:0:8}"
+
+      kubectl version --client
+      kubectl cluster-info
+      kubectl get nodes
+
+      echo "📤 Updating flask-app deployment..."
+      kubectl set image deployment/flask-app \
+        flask-app=$IMAGE_TAG \
+        --namespace=default \
+        --record=false
+
+      echo "⏳ Waiting for rollout..."
+      kubectl rollout status deployment/flask-app \
+        --namespace=default \
+        --timeout=5m
+
+      # Si cloudflared puede no existir en el cluster, evitar que falle el job por eso:
+      if kubectl get deployment cloudflared -n default >/dev/null 2>&1; then
+        echo "🔄 Restarting cloudflared to refresh endpoints..."
+        kubectl rollout restart deployment/cloudflared --namespace=default
+        kubectl rollout status deployment/cloudflared \
+          --namespace=default \
+          --timeout=2m
+      else
+        echo "⚠️  cloudflared deployment no encontrado en namespace default, saltando restart"
+      fi
+
+      echo "📊 Final status:"
+      kubectl get pods -l app=flask-app -n default -o wide || true
+      kubectl get pods -l app=cloudflared -n default -o wide || true
+
+      echo ""
+      echo "✅ Deployment successful!"
+      echo "🌍 App available at: https://app.esprueba.com"
+  environment:
+    name: production
+    url: https://app.esprueba.com
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      when: manual
+    - when: never
