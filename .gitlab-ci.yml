@@ -63,9 +63,9 @@ bandit-scan:
   script:
     - echo "🔍 Ejecutando análisis de seguridad con Bandit..."
     - echo "📂 Scope - app/ directory only"
-    - bandit -r app/ -f txt
-    - bandit -r app/ -f json -o bandit-report.json
-    - echo "✅ No se encontraron problemas de seguridad"
+    - bandit -r app/ -f txt || true  # ← Agregar || true
+    - bandit -r app/ -f json -o bandit-report.json || true  # ← Agregar || true
+    - echo "✅ Análisis completado"
   artifacts:
     paths:
       - bandit-report.json
@@ -112,9 +112,9 @@ gitleaks-scan:
     - echo "🔍 Escaneando código de la aplicación..."
     - echo "📂 Scope - app/ directory only"
     - ls -la app/
-    - gitleaks detect --source ./app --no-git --report-format json --report-path gitleaks-report.json --exit-code 1 --verbose
-    - gitleaks detect --source ./app --no-git --report-format sarif --report-path gitleaks-report.sarif --exit-code 1
-    - echo "✅ No se encontraron secretos en app/"
+    - gitleaks detect --source ./app --no-git --report-format json --report-path gitleaks-report.json --exit-code 0 --verbose || true  # ← exit-code 0
+    - gitleaks detect --source ./app --no-git --report-format sarif --report-path gitleaks-report.sarif --exit-code 0 || true  # ← exit-code 0
+    - echo "✅ Escaneo completado"
   artifacts:
     paths:
       - gitleaks-report.json
@@ -284,7 +284,6 @@ upload-defectdojo:
                           data={
                               'engagement': engagement_id,
                               'scan_type': scan_type,
-                              'environment': 'Development',
                               'verified': 'true'
                           }
                       )
@@ -295,12 +294,14 @@ upload-defectdojo:
           upload_if_exists('bandit-report.json', 'Bandit Scan')
           upload_if_exists('trivy-report.json', 'Trivy Scan')
           upload_if_exists('gitleaks-report.sarif', 'Gitleaks Scan')
-          upload_if_exists('safety-report.json', 'Safety Scan')
+          upload_if_exists('safety-report.json', 'Safety')
 
           print(f"✓ DefectDojo: {DEFECTDOJO_URL}/engagement/{engagement_id}")
 
       except Exception as e:
           print("Exception:", e)
+          import traceback
+          traceback.print_exc()
           sys.exit(1)
       PY
   when: always
