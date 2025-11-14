@@ -169,8 +169,39 @@ services:
     image: rabbitmq:3-alpine
     container_name: defectdojo-rabbitmq
     restart: unless-stopped
+  # k3s - Kubernetes
+  k3s:
+    image: rancher/k3s:v1.28.3-k3s1
+    container_name: k3s-server
+    privileged: true
+    environment:
+      - K3S_TOKEN=mi-token-secreto-k3s-2024
+      - K3S_KUBECONFIG_OUTPUT=/output/kubeconfig.yaml
+      - K3S_KUBECONFIG_MODE=666
+    volumes:
+      - k3s-server:/var/lib/rancher/k3s
+      - ./k3s-kubeconfig:/output
+    ports:
+      - "6443:6443"   # API Server
+      - "8888:80"     # HTTP Ingress
+      - "8889:443"    # HTTPS Ingress
+    tmpfs:
+      - /run
+      - /var/run
+    command: 
+      - server
+      - --disable=traefik
+      - --write-kubeconfig-mode=644
+      - --tls-san=k3s
+      - --tls-san=localhost
+    restart: unless-stopped
+
+networks:
+  default:
+    driver: bridge
 
 volumes:
   n8n-data:
   postgres-data:
   defectdojo-data:
+  k3s-server:
