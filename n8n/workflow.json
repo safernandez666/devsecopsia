@@ -1,5 +1,5 @@
 {
-  "name": "GitLab DevOps AI Agent",
+  "name": "GitLab DevOps AI Agent - Optimized",
   "nodes": [
     {
       "parameters": {
@@ -8,13 +8,13 @@
         "responseMode": "lastNode",
         "options": {}
       },
-      "id": "7ccd579b-b0d7-4168-98c0-40bdcc1ff239",
+      "id": "660d0a0a-1f5e-4dd6-80df-4011abfdcf5a",
       "name": "Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 1.1,
       "position": [
-        -2048,
-        656
+        -1136,
+        -416
       ],
       "webhookId": "gitlab-ai-webhook"
     },
@@ -22,13 +22,26 @@
       "parameters": {
         "jsCode": "const input = $input.first().json;\nconst data = input.body || input;\nreturn [{ json: data }];"
       },
-      "id": "250b48b7-6167-4187-adf7-4279ef4c8837",
+      "id": "08660d94-6d4f-4fb6-8298-e28b995fbb7e",
       "name": "Normalize Data",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -1888,
-        656
+        -976,
+        -416
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst builds = data.builds || [];\nconst pipelineStatus = data.object_attributes?.status;\n\n// Buscar los jobs específicos que nos interesan\nconst securityGate = builds.find(job => job.name === 'security-gate');\nconst deployJob = builds.find(job => job.name === 'deploy-k3s');\n\n// Jobs de seguridad a monitorear\nconst securityJobs = ['bandit-scan', 'safety-scan', 'trivy-scan', 'gitleaks-scan', 'security-gate'];\nconst failedSecurityJob = builds.find(job => \n  securityJobs.includes(job.name) && job.status === 'failed'\n);\n\n// ESCENARIO 1: Security Gate acaba de pasar y Deploy está pendiente\nconst isSecurityGatePassed = securityGate?.status === 'success' && deployJob?.status === 'manual';\n\n// ESCENARIO 2: Deploy acaba de terminar (success o failed)\nconst isDeployFinished = deployJob && (deployJob.status === 'success' || deployJob.status === 'failed');\n\n// ESCENARIO 3: Falló algún job de seguridad (bandit, safety, trivy, gitleaks, security-gate)\nconst isSecurityJobFailed = failedSecurityJob !== undefined;\n\n// Solo procesar si es uno de estos tres escenarios\nif (isSecurityGatePassed || isDeployFinished || isSecurityJobFailed) {\n  // Marcar qué tipo de evento es\n  if (isSecurityGatePassed) {\n    data._eventType = 'SECURITY_PASSED';\n  } else if (isDeployFinished) {\n    data._eventType = 'DEPLOY_FINISHED';\n    data._deployStatus = deployJob?.status || 'unknown';\n  } else if (isSecurityJobFailed) {\n    data._eventType = 'SECURITY_FAILED';\n    data._failedJobName = failedSecurityJob.name;\n  }\n  \n  return [{ json: data }];\n}\n\n// Ignorar todos los demás eventos intermedios\nconsole.log('🔇 Evento ignorado: no es un evento clave');\nreturn [];"
+      },
+      "id": "b45dd367-da11-4ea6-82c3-2455d2acedab",
+      "name": "Filter Events",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -784,
+        -416
       ]
     },
     {
@@ -37,31 +50,15 @@
           "options": {
             "caseSensitive": true,
             "leftValue": "",
-            "typeValidation": "loose"
+            "typeValidation": "strict"
           },
           "conditions": [
             {
-              "leftValue": "={{ $json.event_type }}",
-              "rightValue": "deployment_success",
+              "leftValue": "={{ $json._eventType }}",
+              "rightValue": "SECURITY_PASSED",
               "operator": {
                 "type": "string",
                 "operation": "equals"
-              }
-            },
-            {
-              "leftValue": "={{ $json.object_attributes.status }}",
-              "rightValue": "pending",
-              "operator": {
-                "type": "string",
-                "operation": "notEquals"
-              }
-            },
-            {
-              "leftValue": "={{ $json.object_attributes.status }}",
-              "rightValue": "running",
-              "operator": {
-                "type": "string",
-                "operation": "notEquals"
               }
             }
           ],
@@ -69,47 +66,102 @@
         },
         "options": {}
       },
-      "id": "184e9946-6647-41af-b2f7-fd9e56468d40",
-      "name": "Pipeline or Deploy Finished?",
+      "id": "16b7f506-2a4e-49fa-b634-8318db0e042b",
+      "name": "Is Security Passed?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        -1696,
-        656
+        -560,
+        -416
       ]
     },
     {
       "parameters": {
-        "jsCode": "const data = $input.first().json;\nconst pipelineStatus = data.object_attributes?.status;\nconst jobs = data.builds || [];\n\nconst isPipelineFailed = pipelineStatus === 'failed';\n// Esta lógica ahora captura fallos en jobs aunque el pipeline esté en 'manual' (como sucede con security-gate)\nconst hasFailedJobInManual = pipelineStatus === 'manual' && jobs.some(job => job.status === 'failed');\n\n// Si el pipeline es un fallo directo O es manual pero tiene fallos internos, va por el camino de fallo.\nreturn isPipelineFailed || hasFailedJobInManual ? data : [];\n"
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json._eventType }}",
+              "rightValue": "SECURITY_FAILED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
       },
-      "id": "741bd4ea-bf8d-4dec-a45f-c1da456f5988",
-      "name": "Check for Job Failures",
+      "id": "75a274af-3b2b-4929-822e-755beba3da8f",
+      "name": "Is Security Failed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst message = `\n*✅ Security Checks Pasaron* 🛡️\n\n*📦 Proyecto:* ${data.project?.name || 'N/A'}\n*🌿 Rama:* ${data.object_attributes?.ref || 'N/A'}\n*🔨 Commit:* \\`${data.object_attributes?.sha?.substring(0, 8) || 'N/A'}\\`\n*💬 Mensaje:* ${data.commit?.message || 'N/A'}\n*👤 Autor:* ${data.commit?.author?.name || data.user?.name || 'N/A'}\n\n*✨ Todos los Chequeos Pasaron*\n  ✓ Build completado\n  ✓ Trivy scan (vulnerabilidades)\n  ✓ Bandit scan (código Python)\n  ✓ Safety scan (dependencias)\n  ✓ Gitleaks scan (secretos)\n  ✓ Security Gate aprobado\n\n*🚀 ACCIÓN REQUERIDA: Iniciar Deploy Manual*\n\n*🔗:* <${data.object_attributes?.url || '#'}|Ver Pipeline #${data.object_attributes?.id || 'N/A'}>\n`;\n\nreturn [{ json: { slack_text_content: message } }];"
+      },
+      "id": "9aa05e39-8312-4dfa-9aad-e077fab9fe2d",
+      "name": "Security Passed Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -1472,
-        560
-      ],
-      "connections": {
-        "main": [
-          [
+        -352,
+        -512
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
             {
-              "node": "Get Jobs",
-              "type": "main",
-              "index": 0
+              "leftValue": "={{ $json._deployStatus }}",
+              "rightValue": "success",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
             }
-          ]
-        ],
-        "output_0": [
-          [
-            {
-              "node": "Pipeline Success",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "1cd7601b-99a0-4b47-a7cd-c6ce29f75b73",
+      "name": "Deploy Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst builds = data.builds || [];\nconst deployJob = builds.find(job => job.name === 'deploy-k3s');\n\nconst message = `\n*✅ Deploy Exitoso a Producción* 🚀\n\n*📦 Proyecto:* ${data.project?.name || 'N/A'}\n*🌿 Rama:* ${data.object_attributes?.ref || 'N/A'}\n*🔨 Commit:* \\`${data.object_attributes?.sha?.substring(0, 8) || 'N/A'}\\`\n*💬 Mensaje:* ${data.commit?.message || 'N/A'}\n*👤 Autor:* ${data.commit?.author?.name || data.user?.name || 'N/A'}\n\n*⏱️ Duración del Deploy:* ${deployJob?.duration ? Math.round(deployJob.duration) + 's' : 'N/A'}\n*🌍 App URL:* https://app.esprueba.com\n\n*🔗 Enlaces:*\n- <${data.object_attributes?.url || '#'}|Ver Pipeline #${data.object_attributes?.id || 'N/A'}>\n- <${deployJob?.web_url || '#'}|Ver Job de Deploy>\n\n*📊 Resumen del Pipeline:*\n${builds.filter(b => b.status === 'success').map(b => `  • ${b.name} (${Math.round(b.duration || 0)}s)`).join('\\n')}\n\n_Deployado automáticamente por GitLab CI/CD_ \n`;\n\nreturn [{ json: { slack_text_content: message } }];"
+      },
+      "id": "09e31c5f-6d6d-4a75-b546-4f87e789acd5",
+      "name": "Deploy Success Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -144,
+        -416
+      ]
     },
     {
       "parameters": {
@@ -118,13 +170,13 @@
         "genericAuthType": "httpHeaderAuth",
         "options": {}
       },
-      "id": "fcfd3cf6-65be-48c9-acf6-f8c501d1a479",
-      "name": "Get Jobs",
+      "id": "e87063af-d8e7-4a58-a549-c81062c2ebcb",
+      "name": "Get Security Jobs",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        -1264,
-        464
+        -144,
+        -416
       ],
       "credentials": {
         "httpHeaderAuth": {
@@ -135,20 +187,20 @@
     },
     {
       "parameters": {
-        "jsCode": "const jobs = $input.all();\nconst failedJobs = jobs.filter(job => job.json.status === 'failed');\nif (failedJobs.length === 0) {\n  throw new Error('No failed jobs found');\n}\nfailedJobs.sort((a, b) => b.json.id - a.json.id);\nreturn [{ json: failedJobs[0].json }];"
+        "jsCode": "const jobs = $input.all();\nconst webhookData = $items('Normalize Data')[0]?.json || {};\nconst failedJobName = webhookData._failedJobName;\n\n// Buscar el job específico que falló\nconst failedJob = jobs.find(job => job.json.name === failedJobName && job.json.status === 'failed');\n\nif (!failedJob) {\n  // Si no lo encontramos por nombre, buscamos cualquier job de seguridad fallido\n  const securityJobs = ['bandit-scan', 'safety-scan', 'trivy-scan', 'gitleaks-scan', 'security-gate'];\n  const anyFailedSecJob = jobs.find(job => \n    securityJobs.includes(job.json.name) && job.json.status === 'failed'\n  );\n  \n  if (!anyFailedSecJob) {\n    throw new Error('No se encontró el job de seguridad fallido');\n  }\n  return [{ json: anyFailedSecJob.json }];\n}\n\nreturn [{ json: failedJob.json }];"
       },
-      "id": "1978175c-d81f-4c71-a9ab-4ff2c42c872e",
-      "name": "Get Failed Job",
+      "id": "40208219-8927-4ac3-a330-2309533fbdea",
+      "name": "Get Failed Security Job",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -1040,
-        464
+        64,
+        -416
       ]
     },
     {
       "parameters": {
-        "url": "=http://gitlab-server:8000/api/v4/projects/{{ $node[\"Normalize Data\"].json[\"project\"][\"id\"] }}/jobs/{{ $node[\"Get Failed Job\"].json[\"id\"] }}/trace\n",
+        "url": "=http://gitlab-server:8000/api/v4/projects/{{ $node[\"Normalize Data\"].json[\"project\"][\"id\"] }}/jobs/{{ $node[\"Get Failed Security Job\"].json[\"id\"] }}/trace\n",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {
@@ -157,13 +209,13 @@
           }
         }
       },
-      "id": "7fde3e1e-dcfa-4158-b11d-1b09377e60a8",
-      "name": "Get Job Logs",
+      "id": "d48d033b-b778-47a8-a8dc-bff8d2b374df",
+      "name": "Get Security Logs",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        -832,
-        464
+        400,
+        -416
       ],
       "credentials": {
         "httpHeaderAuth": {
@@ -174,15 +226,15 @@
     },
     {
       "parameters": {
-        "jsCode": "const input = $json;\nif (!input.data || input.data.trim() === '') {\n  return [{\n    json: {\n      body: {\n        model: \"mistral:7b-instruct\",\n        prompt: \"El job falló pero no tiene logs disponibles.\",\n        stream: false,\n        options: { temperature: 0.2, top_p: 0.9 }\n      }\n    }\n  }];\n}\nconst cleanLog = input.data.replace(/\\u001b\\[[0-9;]*m/g, '');\nconst body = {\n  model: \"mistral:7b-instruct\",\n  prompt: `Analiza este error de pipeline de Python/CI/CD y proporciona:\\n\\n📋 RESUMEN (1-2 líneas): ¿Qué falló?\\n\\n🔍 CAUSA RAÍZ: ¿Por qué?\\n\\n📂 ARCHIVO(S): Lista archivos y líneas\\n\\n✅ SOLUCIÓN: Código corregido\\n\\nLog:\\n---\\n${cleanLog}\\n---`,\n  stream: false,\n  options: { temperature: 0.2, top_p: 0.9 }\n};\nreturn [{ json: { body } }];"
+        "jsCode": "const input = $json;\nconst failedJobData = $items('Get Failed Security Job')[0]?.json || {};\nconst jobName = failedJobData.name || 'unknown';\n\nif (!input.data || input.data.trim() === '') {\n  return [{\n    json: {\n      body: {\n        model: \"mistral:7b-instruct\",\n        prompt: `El job de seguridad ${jobName} falló pero no tiene logs disponibles.`,\n        stream: false,\n        options: { temperature: 0.2, top_p: 0.9 }\n      }\n    }\n  }];\n}\n\nconst cleanLog = input.data.replace(/\\u001b\\[[0-9;]*m/g, '');\n\n// Personalizar el prompt según el tipo de scanner\nlet promptContext = '';\nif (jobName.includes('bandit')) {\n  promptContext = 'Bandit (scanner de seguridad de código Python)';\n} else if (jobName.includes('safety')) {\n  promptContext = 'Safety (scanner de vulnerabilidades en dependencias Python)';\n} else if (jobName.includes('trivy')) {\n  promptContext = 'Trivy (scanner de vulnerabilidades en contenedores e imágenes)';\n} else if (jobName.includes('gitleaks')) {\n  promptContext = 'Gitleaks (detector de secretos y credenciales hardcodeadas)';\n} else {\n  promptContext = 'Security Gate (verificador de políticas de seguridad)';\n}\n\nconst body = {\n  model: \"mistral:7b-instruct\",\n  prompt: `Analiza este error del scanner de seguridad ${promptContext} y proporciona:\n\n📋 RESUMEN (1-2 líneas): ¿Qué problema de seguridad detectó?\n\n🔍 VULNERABILIDAD/ISSUE: Detalla el problema encontrado\n\n⚠️ SEVERIDAD: ¿Qué tan crítico es?\n\n📂 UBICACIÓN: ¿Dónde está el problema? (archivo, línea, dependencia)\n\n✅ SOLUCIÓN: Pasos concretos para resolver el issue de seguridad\n\nLog del Scanner:\n---\n${cleanLog}\n---`,\n  stream: false,\n  options: { temperature: 0.2, top_p: 0.9 }\n};\n\nreturn [{ json: { body } }];"
       },
-      "id": "80be0dba-6d45-47a9-a916-3c544bede9db",
-      "name": "Prepare Ollama JSON",
+      "id": "fb0541ed-3bce-4ec9-aa1f-16e97906bf30",
+      "name": "Prepare Security Ollama",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -640,
-        464
+        608,
+        -416
       ]
     },
     {
@@ -194,52 +246,131 @@
         "jsonBody": "={{$json[\"body\"]}}",
         "options": {}
       },
-      "id": "4022db80-1c71-43f2-80a0-d63aff3704a7",
+      "id": "cde3ed45-4531-4c42-8039-ea47f86bbb4f",
+      "name": "Analyze Security with Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        816,
+        -416
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst ollamaResponse = Array.isArray(input) ? input[0] : input.body?.[0] || input;\nconst analysis = ollamaResponse.response || \"(sin respuesta)\";\nconst webhookData = $items('Normalize Data')[0]?.json || {};\nconst failedJobData = $items('Get Failed Security Job')[0]?.json || {};\n\nconst messageText = `\n*🚨 Fallo en Security Scan* ⛔\n\n*📦 Proyecto:* ${webhookData.project?.name || 'N/A'}\n*🌿 Rama:* ${webhookData.object_attributes?.ref || 'N/A'}\n*🧩 Scanner:* ${failedJobData.name || 'N/A'}\n*🔗:* <${webhookData.object_attributes?.url}|Ver Pipeline #${webhookData.object_attributes?.id || 'N/A'}>\n*📋 Job URL:* <${failedJobData.web_url || '#'}|Ver Logs del Scanner>\n\n*🤖 Análisis AI del Issue de Seguridad*\n${analysis}\n`;\n\nreturn [{ json: { slack_text_content: messageText } }];"
+      },
+      "id": "ee3ce7ce-77d1-4a2c-94c5-05eb89db2cf1",
+      "name": "Format Security Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1024,
+        -416
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://gitlab-server:8000/api/v4/projects/{{ $json.project.id }}/pipelines/{{ $json.object_attributes.id }}/jobs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "c5301079-21d5-4faf-9f30-1e66abc73c88",
+      "name": "Get Jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -144,
+        -224
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "cJwL41jWb4QSDmYR",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const jobs = $input.all();\n// Buscar el job de deploy que falló\nconst deployJob = jobs.find(job => job.json.name === 'deploy-k3s' && job.json.status === 'failed');\n\nif (!deployJob) {\n  throw new Error('No se encontró el job de deploy fallido');\n}\n\nreturn [{ json: deployJob.json }];"
+      },
+      "id": "7723dd82-64f6-4ffa-90f3-e92b7225c0e7",
+      "name": "Get Failed Deploy Job",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        -224
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://gitlab-server:8000/api/v4/projects/{{ $node[\"Normalize Data\"].json[\"project\"][\"id\"] }}/jobs/{{ $node[\"Get Failed Deploy Job\"].json[\"id\"] }}/trace\n",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {}
+          }
+        }
+      },
+      "id": "ab641f38-0a95-4527-947e-3b508bfbb682",
+      "name": "Get Deploy Logs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        -224
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "cJwL41jWb4QSDmYR",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $json;\nif (!input.data || input.data.trim() === '') {\n  return [{\n    json: {\n      body: {\n        model: \"mistral:7b-instruct\",\n        prompt: \"El deploy falló pero no tiene logs disponibles.\",\n        stream: false,\n        options: { temperature: 0.2, top_p: 0.9 }\n      }\n    }\n  }];\n}\n\nconst cleanLog = input.data.replace(/\\u001b\\[[0-9;]*m/g, '');\nconst body = {\n  model: \"mistral:7b-instruct\",\n  prompt: `Analiza este error de DEPLOY a Kubernetes/K3s y proporciona:\n\n📋 RESUMEN (1-2 líneas): ¿Qué falló en el deploy?\n\n🔍 CAUSA RAÍZ: ¿Por qué falló el deploy?\n\n📂 COMPONENTE: ¿Qué parte del deploy falló? (pod, service, configmap, etc)\n\n✅ SOLUCIÓN: Cómo resolver el problema\n\nLog del Deploy:\n---\n${cleanLog}\n---`,\n  stream: false,\n  options: { temperature: 0.2, top_p: 0.9 }\n};\n\nreturn [{ json: { body } }];"
+      },
+      "id": "30710a27-9996-46d4-ade2-24bb73e1a634",
+      "name": "Prepare Ollama JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        -224
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://192.168.0.12:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$json[\"body\"]}}",
+        "options": {}
+      },
+      "id": "243597ec-0602-429b-943c-a44507a0759e",
       "name": "Analyze with Ollama",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        -448,
-        464
+        816,
+        -224
       ]
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first().json;\nconst ollamaResponse = Array.isArray(input) ? input[0] : input.body?.[0] || input;\nconst analysis = ollamaResponse.response || \"(sin respuesta)\";\nconst webhookData = $items('Normalize Data')[0]?.json || {};\nconst failedJobData = $items('Get Failed Job')[0]?.json || {};\n\nconst messageText = `\n*🚨 Pipeline Fallido*\n\n*📦 Proyecto:* ${webhookData.project?.name || 'N/A'}\n*🌿 Rama:* ${webhookData.object_attributes?.ref || 'N/A'}\n*🧩 Job:* ${failedJobData.name || 'N/A'}\n*🔗:* <${webhookData.object_attributes?.url}|Ver Pipeline>\n\n*🤖 Análisis AI*\n${analysis}\n`;\n\nreturn [{ json: { slack_text_content: messageText } }];"
+        "jsCode": "const input = $input.first().json;\nconst ollamaResponse = Array.isArray(input) ? input[0] : input.body?.[0] || input;\nconst analysis = ollamaResponse.response || \"(sin respuesta)\";\nconst webhookData = $items('Normalize Data')[0]?.json || {};\nconst failedJobData = $items('Get Failed Deploy Job')[0]?.json || {};\n\nconst messageText = `\n*🚨 Deploy Fallido* ❌\n\n*📦 Proyecto:* ${webhookData.project?.name || 'N/A'}\n*🌿 Rama:* ${webhookData.object_attributes?.ref || 'N/A'}\n*🧩 Job:* ${failedJobData.name || 'N/A'}\n*🔗:* <${webhookData.object_attributes?.url}|Ver Pipeline #${webhookData.object_attributes?.id || 'N/A'}>\n*📋 Job URL:* <${failedJobData.web_url || '#'}|Ver Deploy Logs>\n\n*🤖 Análisis AI del Error*\n${analysis}\n`;\n\nreturn [{ json: { slack_text_content: messageText } }];"
       },
-      "id": "57279d20-c015-4806-b70e-18efcc689f38",
-      "name": "Format Response",
+      "id": "61afce07-29ee-490c-a383-22707a833c51",
+      "name": "Format Deploy Error",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -256,
-        464
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "const data = $input.first().json;\n\n// Obtener todos los jobs del pipeline\nconst allJobs = data.builds || [];\nconst pipelineStatus = data.object_attributes?.status;\n\n// Si el pipeline es 'failed' o si existe CUALQUIER job fallido, aborta el camino de éxito.\nif (allJobs.some(job => job.status === 'failed')) {\n  console.log('❌ Job(s) fallidos detectados. Abortando mensaje de éxito.');\n  return [];\n}\n\n// --- Si no hay fallos, es un Pipeline Exitoso/Manual --- \n\nconsole.log('✅ No fallos detectados. Continuado con mensaje de éxito.');\n\nconst deployJob = allJobs.find(job => job.name === 'deploy-k3s');\n\n// 1. Mensaje de Deploy Exitoso (si el deploy terminó con éxito)\nif (deployJob && deployJob.status === 'success') {\n  console.log('✅ Deploy job succeeded, sending deployment success message');\n  \n  const deploymentMessage = `\\n*✅ Deploy Exitoso a Producción* 🚀\\n\\n*📦 Proyecto:* ${data.project?.name || 'N/A'}\\n*🌿 Rama:* ${data.object_attributes?.ref || 'N/A'}\\n*🔨 Commit:* \\`${data.object_attributes?.sha?.substring(0, 8) || 'N/A'}\\`\\n*💬 Mensaje:* ${data.commit?.message || 'N/A'}\\n*👤 Autor:* ${data.commit?.author?.name || data.user?.name || 'N/A'}\\n\\n*⏱️ Duración del Deploy:* ${deployJob.duration || 'N/A'}s\\n*🌍 App URL:* https://app.esprueba.com\\n\\n*🔗 Enlaces:*\\n- <${data.object_attributes?.url || '#'}|Ver Pipeline #${data.object_attributes?.id || 'N/A'}>\\n- <${deployJob.web_url || '#'}|Ver Job de Deploy>\\n\\n*📊 Resumen del Pipeline:*\\n${allJobs.filter(b => b.status === 'success').map(b => `  • ${b.name} (${b.duration}s)`).join('\\n')}\\n\\n_Deployado automáticamente por GitLab CI/CD_ \\n`;\n  \n  return [{ json: { slack_text_content: deploymentMessage } }];\n}\n\n// 2. Mensaje de Pipeline Exitoso PERO con Deploy Manual/Pendiente\n// Se ejecuta si no hubo fallos Y el deploy es manual o pendiente.\nif (deployJob && (deployJob.status === 'manual' || deployJob.status === 'created')) {\n    console.log(`⚠️ Pipeline Pasó, pero Deploy pendiente. Enviando notificación.`);\n    \n    const manualDeployMessage = `\\n*✅ Pipeline Pasó: Listo para Deploy*\\n\\n*📦 Proyecto:* ${data.project?.name || 'N/A'}\\n*🌿 Rama:* ${data.object_attributes?.ref || 'N/A'}\\n*🔨 Commit:* \\`${data.object_attributes?.sha?.substring(0, 8) || 'N/A'}\\`\\n*👤 Autor:* ${data.commit?.author?.name || data.user?.name || 'N/A'}\\n\\n*✨ Todos los Chequeos de Seguridad Pasaron*\\n\\n*🚀 ACCIÓN REQUERIDA: INICIAR EL DEPLOY MANUAL*\\n\\n*🔗:* <${data.object_attributes?.url || '#'}|Ver Pipeline #${data.object_attributes?.id || 'N/A'}>\n`;\n\n    return [{ json: { slack_text_content: manualDeployMessage } }];\n}\n\n// 3. Fallback: Mensaje estándar de pipeline exitoso (si no hay deploy job o no cumple ninguna de las anteriores)\nconsole.log('⚠️ Fallback: Deploy job no encontrado o estado no manejado. Enviando mensaje estándar.');\nconst standardMessage = `\\n*✅ Pipeline Exitoso*\\n\\n*📦 Proyecto:* ${data.project?.name || 'N/A'}\\n*🌿 Rama:* ${data.object_attributes?.ref || 'N/A'}\\n*⏱️ Duración:* ${data.object_attributes?.duration || 'N/A'}s\\n*🔗:* ${data.object_attributes?.url || '#'}\\n\\n*📊 Jobs completados:*\\n${allJobs.filter(b => b.status === 'success').map(b => `  • ${b.name} (${b.duration}s)`).join('\\n') || 'N/A'}\\n`;\n\nreturn [{ json: { slack_text_content: standardMessage } }];"
-      },
-      "id": "2d39a713-257f-4846-b6eb-b6051b98c6ab",
-      "name": "Pipeline Success",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -1264,
-        656
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "return [{ json: { ignored: true, message: \"Pipeline running\" } }];"
-      },
-      "id": "f2df6495-0863-4d7a-b20f-5beabec44e1e",
-      "name": "Ignore Running",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -1472,
-        768
+        1024,
+        -224
       ]
     },
     {
@@ -253,13 +384,13 @@
         "text": "={{ $json.slack_text_content }}",
         "otherOptions": {}
       },
-      "id": "73156ae4-d005-4e17-9124-13f8a88bf82c",
-      "name": "Send a message",
+      "id": "9037a549-b4a1-4b73-85eb-3f9664260a1a",
+      "name": "Send to Slack",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.3,
       "position": [
-        48,
-        656
+        1312,
+        -816
       ],
       "webhookId": "50a51d59-30c3-4052-ab32-e6d65939a749",
       "credentials": {
@@ -287,33 +418,146 @@
       "main": [
         [
           {
-            "node": "Pipeline or Deploy Finished?",
+            "node": "Filter Events",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Pipeline or Deploy Finished?": {
+    "Filter Events": {
       "main": [
         [
           {
-            "node": "Check for Job Failures",
+            "node": "Is Security Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Security Passed?": {
+      "main": [
+        [
+          {
+            "node": "Security Passed Message",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Ignore Running",
+            "node": "Is Security Failed?",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Check for Job Failures": {
+    "Is Security Failed?": {
       "main": [
+        [
+          {
+            "node": "Get Security Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Deploy Success?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Security Jobs": {
+      "main": [
+        [
+          {
+            "node": "Get Failed Security Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Failed Security Job": {
+      "main": [
+        [
+          {
+            "node": "Get Security Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Security Logs": {
+      "main": [
+        [
+          {
+            "node": "Prepare Security Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Security Ollama": {
+      "main": [
+        [
+          {
+            "node": "Analyze Security with Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Security with Ollama": {
+      "main": [
+        [
+          {
+            "node": "Format Security Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Security Error": {
+      "main": [
+        [
+          {
+            "node": "Send to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Security Passed Message": {
+      "main": [
+        [
+          {
+            "node": "Send to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deploy Success?": {
+      "main": [
+        [
+          {
+            "node": "Deploy Success Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
         [
           {
             "node": "Get Jobs",
@@ -321,11 +565,13 @@
             "index": 0
           }
         ]
-      ],
-      "output_0": [
+      ]
+    },
+    "Deploy Success Message": {
+      "main": [
         [
           {
-            "node": "Pipeline Success",
+            "node": "Send to Slack",
             "type": "main",
             "index": 0
           }
@@ -336,25 +582,25 @@
       "main": [
         [
           {
-            "node": "Get Failed Job",
+            "node": "Get Failed Deploy Job",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Get Failed Job": {
+    "Get Failed Deploy Job": {
       "main": [
         [
           {
-            "node": "Get Job Logs",
+            "node": "Get Deploy Logs",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Get Job Logs": {
+    "Get Deploy Logs": {
       "main": [
         [
           {
@@ -380,29 +626,18 @@
       "main": [
         [
           {
-            "node": "Format Response",
+            "node": "Format Deploy Error",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Format Response": {
+    "Format Deploy Error": {
       "main": [
         [
           {
-            "node": "Send a message",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Pipeline Success": {
-      "main": [
-        [
-          {
-            "node": "Send a message",
+            "node": "Send to Slack",
             "type": "main",
             "index": 0
           }
@@ -414,7 +649,7 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "17bb1894-c93e-4b46-8cb4-93d13e430847",
+  "versionId": "389ea1bb-1b24-4d4b-95af-9f1cd03a1206",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "c8fec02d4536f3812930f20a7a32e75107a2733546bfc42d5423551ef78e737f"
