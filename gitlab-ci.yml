@@ -1,0 +1,741 @@
+# ====================================================================
+# PIPELINE CI/CD DE SEGURIDAD DEVSECSOPS
+# ====================================================================
+# Implementa un flujo completo de seguridad con:
+# - SAST: Análisis estático de código (Bandit, Safety, GitLeaks, Trivy)
+# - DAST: Análisis dinámico de aplicación (ZAP)
+# - Security Gate: Control de calidad antes de producción
+# - Integración con DefectDojo para centralizar hallazgos
+# ====================================================================
+
+stages:
+  - build           # Construcción de imagen Docker
+  - sast            # Análisis estático de seguridad
+  - delivery-dev    # Despliegue a desarrollo
+  - dast            # Análisis dinámico de seguridad
+  - report          # Reporte centralizado en DefectDojo
+  - review          # Security Gate (decision point)
+  - delivery-prd    # Despliegue a producción (manual)
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  REGISTRY_IMAGE: "localhost:5001/root/python-application"
+  TARGET: "https://app-dev.esprueba.com"
+
+# ====================================================================
+# BUILD: Construcción y publicación de imagen Docker
+# ====================================================================
+build:
+  stage: build
+  image: docker:latest
+  tags:
+    - docker
+  variables:
+    DOCKER_HOST: unix:///var/run/docker.sock
+  before_script:
+    - docker info
+    # Autenticación en registries
+    - echo "🔐 Logging into Docker Hub..."
+    - echo "$dockerhub_password" | docker login -u $dockerhub_username --password-stdin
+    - echo "🔐 Logging into GitLab registry..."
+    - docker login localhost:5001 -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+  script:
+    - echo "🏗️ Building Docker image..."
+    - cd app
+    # Build con metadatos del commit
+    - |
+      docker build \
+        --build-arg CI_COMMIT_SHORT_SHA=${CI_COMMIT_SHORT_SHA} \
+        --build-arg CI_COMMIT_SHA=${CI_COMMIT_SHA} \
+        -t "$REGISTRY_IMAGE:${CI_COMMIT_SHA:0:8}" \
+        -t "$REGISTRY_IMAGE:latest" \
+        -t "safernandez666/python-application:${CI_COMMIT_SHA:0:8}" \
+        -t "safernandez666/python-application:latest" \
+        .
+    - cd ..
+    # Push a ambos registries
+    - echo "📤 Pushing to GitLab registry..."
+    - docker push "$REGISTRY_IMAGE:${CI_COMMIT_SHA:0:8}"
+    - docker push "$REGISTRY_IMAGE:latest"
+    - echo "📤 Pushing to Docker Hub..."
+    - docker push "safernandez666/python-application:${CI_COMMIT_SHA:0:8}"
+    - docker push "safernandez666/python-application:latest"
+    - echo "✅ Build complete!"
+  only:
+    - main
+
+# ====================================================================
+# SAST: ANÁLISIS ESTÁTICO DE SEGURIDAD
+# ====================================================================
+
+# --------------------------------------------------------------------
+# Bandit: Análisis de vulnerabilidades en código Python
+# --------------------------------------------------------------------
+bandit-scan:
+  stage: sast
+  image: python:3.9-slim
+  tags:
+    - docker
+  before_script:
+    - pip install bandit
+  script:
+    - echo "🔍 Ejecutando Bandit SAST..."
+    - bandit -r app/ -f txt || true  # Mostrar en consola
+    - bandit -r app/ -f json -o bandit-report.json || true  # Guardar JSON
+    - echo "✅ Bandit completado"
+  artifacts:
+    paths:
+      - bandit-report.json
+    expire_in: 1 week
+    when: always
+  allow_failure: true  # No bloquea el pipeline
+  only:
+    - main
+
+# --------------------------------------------------------------------
+# Safety: Análisis de dependencias vulnerables
+# --------------------------------------------------------------------
+safety-scan:
+  stage: sast
+  image: python:3.9-slim
+  tags:
+    - docker
+  before_script:
+    - pip install safety
+  script:
+    - echo "🔍 Analizando dependencias con Safety..."
+    - safety check --file app/requirements.txt --output json > safety-report.json || true
+    - echo "✅ Safety completado"
+  artifacts:
+    paths:
+      - safety-report.json
+    expire_in: 1 week
+    when: always
+  allow_failure: true
+  only:
+    - main
+
+# --------------------------------------------------------------------
+# Conversión de Safety a GenericFindings para DefectDojo
+# IMPORTANTE: Debe ejecutarse en stage SAST para estar disponible
+# antes del upload a DefectDojo
+# --------------------------------------------------------------------
+convert-safety:
+  stage: sast
+  image: python:3.9-slim
+  tags:
+    - docker
+  needs:
+    - job: safety-scan
+      artifacts: true
+  script:
+    - |
+      python3 << 'PYEOF'
+      import json
+      import sys
+      
+      # Leer reporte de Safety
+      try:
+          with open('safety-report.json', 'r') as f:
+              safety_data = json.load(f)
+      except:
+          print("⚠️ No se pudo leer safety-report.json, creando vacío")
+          safety_data = {"vulnerabilities": []}
+      
+      findings = []
+      
+      # Convertir cada vulnerabilidad al formato GenericFindings
+      for vuln in safety_data.get('vulnerabilities', []):
+          finding = {
+              "title": f"Vulnerable package: {vuln.get('package_name', 'unknown')} {vuln.get('analyzed_version', '')}",
+              "description": f"**Package:** {vuln.get('package_name')}\n**Installed Version:** {vuln.get('analyzed_version')}\n**Vulnerable Spec:** {vuln.get('vulnerable_spec')}\n\n{vuln.get('advisory', 'No advisory available')}",
+              "severity": "High" if vuln.get('severity', 'medium').lower() == 'high' else "Medium",
+              "cwe": 1035,  # Vulnerable Third-Party Component
+              "mitigation": f"Upgrade to version {vuln.get('fixed_version', 'latest')} or higher",
+              "references": vuln.get('more_info_url', ''),
+              "active": True,
+              "verified": False,
+              "static_finding": True,
+              "dynamic_finding": False,
+              "unique_id_from_tool": vuln.get('vulnerability_id', '')
+          }
+          findings.append(finding)
+      
+      # Guardar en formato GenericFindings
+      output = {"findings": findings}
+      with open('safety-generic.json', 'w') as f:
+          json.dump(output, f, indent=2)
+      
+      print(f"✅ Convertidos {len(findings)} findings de Safety")
+      PYEOF
+  artifacts:
+    paths:
+      - safety-generic.json
+    when: always
+  allow_failure: true
+  only:
+    - main
+
+# --------------------------------------------------------------------
+# GitLeaks: Detección de secretos hardcodeados
+# --------------------------------------------------------------------
+gitleaks-scan:
+  stage: sast
+  image: alpine:latest
+  tags:
+    - docker
+  before_script:
+    - apk add --no-cache git wget jq
+    # Descargar e instalar GitLeaks
+    - wget -O gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_arm64.tar.gz
+    - tar -xzf gitleaks.tar.gz
+    - chmod +x gitleaks
+    - mv gitleaks /usr/local/bin/
+  script:
+    - echo "🔍 Escaneando secretos con GitLeaks..."
+    - gitleaks detect --source ./app --no-git --report-format json --report-path gitleaks-report.json --exit-code 0 --verbose || true
+    - gitleaks detect --source ./app --no-git --report-format sarif --report-path gitleaks-report.sarif --exit-code 0 || true
+    - echo "✅ GitLeaks completado"
+  artifacts:
+    paths:
+      - gitleaks-report.json
+      - gitleaks-report.sarif
+    expire_in: 1 week
+    when: always
+  allow_failure: true
+  only:
+    - main
+
+# --------------------------------------------------------------------
+# Trivy: Análisis de vulnerabilidades en imagen Docker
+# --------------------------------------------------------------------
+trivy-scan:
+  stage: sast
+  image: docker:latest
+  tags:
+    - docker
+  variables:
+    DOCKER_HOST: unix:///var/run/docker.sock
+  before_script:
+    - apk add --no-cache curl wget
+    # Instalación de Trivy con detección automática de arquitectura
+    - |
+      echo "🔍 Detectando arquitectura..."
+      ARCH=$(uname -m)
+      echo "Arquitectura: $ARCH"
+      
+      TRIVY_VERSION="0.58.1"
+      
+      case $ARCH in
+        aarch64|arm64)
+          TRIVY_URL="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz"
+          ;;
+        x86_64)
+          TRIVY_URL="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          ;;
+        *)
+          echo "❌ Arquitectura no soportada: $ARCH"
+          exit 1
+          ;;
+      esac
+      
+      echo "📥 Descargando Trivy..."
+      wget -q "$TRIVY_URL" -O trivy.tar.gz
+      tar -xzf trivy.tar.gz
+      mv trivy /usr/local/bin/
+      chmod +x /usr/local/bin/trivy
+      rm trivy.tar.gz
+    - trivy --version || (echo "❌ Trivy no instalado"; exit 1)
+  script:
+    - echo "🔍 Verificando Docker..."
+    - docker info || (echo "❌ Docker no disponible"; exit 1)
+    
+    - echo "📥 Descargando imagen..."
+    - docker pull $REGISTRY_IMAGE:latest
+    
+    - echo "🔍 Escaneando con Trivy..."
+    - trivy image --format table $REGISTRY_IMAGE:latest || true
+    
+    - echo "📊 Generando reporte JSON..."
+    - trivy image --format json --output trivy-report.json --severity HIGH,CRITICAL $REGISTRY_IMAGE:latest
+    
+    # Mostrar resumen de vulnerabilidades
+    - |
+      if [ -f trivy-report.json ]; then
+        echo "✅ Reporte generado"
+        ls -lh trivy-report.json
+        CRITICAL=$(grep -c '"Severity":"CRITICAL"' trivy-report.json || echo "0")
+        HIGH=$(grep -c '"Severity":"HIGH"' trivy-report.json || echo "0")
+        echo "📊 Vulnerabilidades: $CRITICAL críticas, $HIGH altas"
+      else
+        echo "❌ No se generó trivy-report.json"
+        exit 1
+      fi
+  artifacts:
+    paths:
+      - trivy-report.json
+    reports:
+      container_scanning: trivy-report.json  # GitLab Security Dashboard
+    expire_in: 1 week
+    when: always
+  allow_failure: true
+  dependencies:
+    - build
+  only:
+    - main
+
+# ====================================================================
+# DELIVERY DEV: Despliegue automático a desarrollo
+# ====================================================================
+deploy-dev:
+  stage: delivery-dev
+  image: alpine/k8s:1.28.3
+  tags:
+    - docker
+  needs:
+    - job: build
+      optional: false
+  before_script:
+    # Configurar kubeconfig
+    - mkdir -p ~/.kube
+    - echo "$KUBECONFIG_CONTENT" > ~/.kube/config
+    - export KUBECONFIG=~/.kube/config
+  script:
+    - |
+      set -euo pipefail
+      IMAGE_TAG="safernandez666/python-application:${CI_COMMIT_SHA:0:8}"
+      NAMESPACE="development"
+      
+      echo "🚀 Deploying to DEV (k3s namespace: $NAMESPACE)"
+      
+      # Crear namespace si no existe
+      kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+      
+      # Aplicar manifiestos
+      kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -n $NAMESPACE
+      kubectl apply -f k8s/cloudflare-tunnel-dev.yaml -n $NAMESPACE
+      
+      # Actualizar imagen del deployment
+      echo "📤 Updating flask-app deployment..."
+      kubectl set image deployment/flask-app \
+        flask-app=$IMAGE_TAG \
+        --namespace=$NAMESPACE \
+        --record=false
+      
+      # Esperar rollout
+      echo "⏳ Waiting for rollout..."
+      kubectl rollout status deployment/flask-app \
+        --namespace=$NAMESPACE \
+        --timeout=5m
+      
+      # Reiniciar túnel de Cloudflare
+      echo "🔄 Restarting cloudflared-dev..."
+      kubectl rollout restart deployment/cloudflared-dev --namespace=$NAMESPACE
+      kubectl rollout status deployment/cloudflared-dev \
+        --namespace=$NAMESPACE \
+        --timeout=2m
+      
+      echo "✅ Deployment DEV successful!"
+      echo "🌍 App available at: ${TARGET}"
+  environment:
+    name: development
+    url: https://app-dev.esprueba.com
+  only:
+    - main
+
+# ====================================================================
+# DAST: ANÁLISIS DINÁMICO CON OWASP ZAP
+# ====================================================================
+zap-scan:
+  stage: dast
+  image: ghcr.io/zaproxy/zaproxy:stable
+  tags:
+    - docker
+  needs:
+    - job: deploy-dev  # Requiere que la app esté desplegada
+  variables:
+    ZAP_TARGET: "https://app-dev.esprueba.com"
+  script:
+    # Crear directorio de trabajo de ZAP
+    - mkdir -p /zap/wrk
+    - cd /zap/wrk
+    
+    - echo "🕷️ Ejecutando ZAP Baseline Scan..."
+    # -I: No fallar por warnings
+    # -r: Reporte HTML
+    # -J: Reporte JSON
+    # -x: Reporte XML
+    - |
+      zap-baseline.py \
+        -t ${ZAP_TARGET} \
+        -I \
+        -r zap-report.html \
+        -J zap-report.json \
+        -x zap-report.xml \
+        2>&1 || echo "⚠️ ZAP warnings (normal)"
+    
+    # Verificar archivos generados
+    - ls -lh /zap/wrk/
+    
+    # Copiar a workspace de GitLab para artifacts
+    - mkdir -p /builds/root/python-application/zap-results
+    - cp -v /zap/wrk/zap-report.* /builds/root/python-application/zap-results/ 2>/dev/null || true
+    
+    - cd /builds/root/python-application
+    - ls -lh zap-results/
+    
+    # Verificar y contar alertas
+    - |
+      if [ -f zap-results/zap-report.json ]; then
+        echo "✅ ZAP JSON generado"
+        ALERTS=$(jq '[.site[]?.alerts[]?] | length' zap-results/zap-report.json 2>/dev/null || echo "0")
+        echo "🔍 Total alertas encontradas: $ALERTS"
+        head -n 50 zap-results/zap-report.json
+      else
+        echo "⚠️ ZAP JSON no generado, creando reporte vacío"
+        mkdir -p zap-results
+        echo '{"site": []}' > zap-results/zap-report.json
+      fi
+  artifacts:
+    paths:
+      - zap-results/
+    when: always
+  allow_failure: true  # DAST no debe bloquear el pipeline
+  only:
+    - main
+
+# ====================================================================
+# REPORT: Upload centralizado a DefectDojo
+# ====================================================================
+upload-defectdojo:
+  stage: report
+  image: python:3.9-slim
+  tags:
+    - docker
+  needs:
+    - job: bandit-scan
+      artifacts: true
+      optional: true
+    - job: trivy-scan
+      artifacts: true
+      optional: true
+    - job: gitleaks-scan
+      artifacts: true
+      optional: true
+    - job: convert-safety  # Usa el JSON convertido
+      artifacts: true
+      optional: true
+    - job: zap-scan
+      artifacts: true
+      optional: true
+  before_script:
+    - pip install requests
+  script:
+    - echo "📤 === DEFECTDOJO UPLOAD ==="
+    - echo "DEFECTDOJO_URL=${DEFECTDOJO_URL:-http://localhost:8080}"
+    - ls -la
+    - |
+      python3 << 'PYEOF'
+      import requests, os, sys, json
+      from datetime import datetime
+      
+      # Configuración
+      DEFECTDOJO_URL = os.getenv('DEFECTDOJO_URL', 'http://localhost:8080').rstrip('/')
+      API_KEY = os.getenv('DEFECTDOJO_API_KEY')
+      headers = {'Authorization': f'Token {API_KEY}'} if API_KEY else {}
+      
+      def check_resp(resp, context):
+          """Helper para logging de respuestas"""
+          print(f"\n{context}")
+          print(f"  Status: {resp.status_code}")
+          try:
+              data = resp.json()
+              print(f"  Response: {json.dumps(data, indent=2)[:500]}")
+              return resp.status_code, data
+          except:
+              print(f"  Text: {resp.text[:500]}")
+              return resp.status_code, {}
+      
+      def find_first_existing(paths):
+          """Busca el primer archivo existente de una lista"""
+          for p in paths:
+              if os.path.exists(p) and os.path.getsize(p) > 0:
+                  print(f"  ✅ Found: {p}")
+                  return p
+          print(f"  ⚠️ None found from: {paths}")
+          return None
+      
+      try:
+          if not API_KEY:
+              print("❌ DEFECTDOJO_API_KEY not set")
+              sys.exit(0)
+          
+          print("🔧 Setting up DefectDojo...")
+          
+          # 1. Product Type
+          r = requests.get(f"{DEFECTDOJO_URL}/api/v2/product_types/", headers=headers)
+          if r.status_code != 200:
+              print(f"❌ Cannot access DefectDojo")
+              sys.exit(1)
+          
+          pts = r.json().get('results', [])
+          product_type_id = next((pt['id'] for pt in pts if pt['name'] == 'Web Application'), None)
+          
+          if not product_type_id:
+              r = requests.post(f"{DEFECTDOJO_URL}/api/v2/product_types/", 
+                               headers=headers, 
+                               json={'name': 'Web Application', 'description': 'Web applications'})
+              product_type_id = r.json().get('id') if r.status_code == 201 else None
+          
+          # 2. Product
+          product_name = "Python Application"
+          r = requests.get(f"{DEFECTDOJO_URL}/api/v2/products/", 
+                          headers=headers, 
+                          params={'name': product_name})
+          products = r.json().get('results', [])
+          product_id = next((p['id'] for p in products if p['name'] == product_name), None)
+          
+          if not product_id:
+              r = requests.post(f"{DEFECTDOJO_URL}/api/v2/products/", 
+                               headers=headers, 
+                               json={'name': product_name, 
+                                    'description': 'Python Flask Application', 
+                                    'prod_type': product_type_id})
+              product_id = r.json().get('id') if r.status_code == 201 else None
+          
+          # 3. Engagement
+          engagement_name = f"Pipeline {os.getenv('CI_PIPELINE_ID', 'local')} - {datetime.now().strftime('%Y-%m-%d')}"
+          r = requests.post(f"{DEFECTDOJO_URL}/api/v2/engagements/", 
+                           headers=headers, 
+                           json={
+                               'name': engagement_name, 
+                               'product': product_id, 
+                               'target_start': datetime.now().strftime('%Y-%m-%d'), 
+                               'target_end': '2025-12-31', 
+                               'engagement_type': 'CI/CD',
+                               'status': 'In Progress'
+                           })
+          status, data = check_resp(r, "📝 Creating engagement")
+          if status != 201:
+              sys.exit(1)
+          
+          engagement_id = data.get('id')
+          print(f"\n✅ Engagement created: {engagement_id}")
+          
+          # 4. Upload scans
+          print("\n📤 Uploading scan results...")
+          
+          # Configuración de parsers y archivos
+          scans = [
+              ('Bandit Scan', ['bandit-report.json']),
+              ('Trivy Scan', ['trivy-report.json']),
+              ('Gitleaks Scan', ['gitleaks-report.json']),
+              ('Generic Findings Import', ['safety-generic.json']),
+              ('ZAP Scan', ['zap-results/zap-report.json'])  # ⭐ SOLO JSON
+          ]
+          
+          uploaded_count = 0
+          total_findings = 0
+          
+          for scan_type, paths in scans:
+              path = find_first_existing(paths)
+              if not path:
+                  continue
+              
+              print(f"\n📤 Uploading: {scan_type}")
+              print(f"   File: {path}")
+              
+              with open(path, 'rb') as f:
+                  files = {'file': (os.path.basename(path), f)}
+                  data = {
+                      'engagement': engagement_id,
+                      'scan_type': scan_type,
+                      'environment': 'Development',
+                      'verified': 'true',
+                      'active': 'true',
+                      'minimum_severity': 'Info',  # Importar todos los niveles
+                      'close_old_findings': 'false',
+                      'skip_duplicates': 'true',
+                      'scan_date': datetime.now().strftime('%Y-%m-%d')
+                  }
+                  
+                  resp = requests.post(
+                      f'{DEFECTDOJO_URL}/api/v2/import-scan/', 
+                      headers={'Authorization': f'Token {API_KEY}'}, 
+                      files=files, 
+                      data=data
+                  )
+                  
+                  status, resp_data = check_resp(resp, f"   Upload {scan_type}")
+                  
+                  if status == 201:
+                      findings_count = resp_data.get('test_import_finding_count', 0)
+                      print(f"   ✅ Imported {findings_count} findings")
+                      uploaded_count += 1
+                      total_findings += findings_count
+                  else:
+                      print(f"   ⚠️ Upload failed")
+          
+          # Summary
+          print("\n" + "="*50)
+          print(f"📊 UPLOAD SUMMARY:")
+          print(f"   Scans uploaded: {uploaded_count}")
+          print(f"   Total findings: {total_findings}")
+          print(f"   Engagement URL: {DEFECTDOJO_URL}/engagement/{engagement_id}")
+          print("="*50)
+      
+      except Exception as e:
+          print(f"\n❌ Exception: {e}")
+          import traceback
+          traceback.print_exc()
+          sys.exit(1)
+      PYEOF
+  when: always  # Ejecutar siempre, incluso si jobs anteriores fallan
+  allow_failure: true  # No bloquear pipeline si falla el upload
+  only:
+    - main
+
+# ====================================================================
+# REVIEW: Security Gate - Punto de decisión
+# ====================================================================
+security-gate:
+  stage: review
+  image: alpine:latest
+  tags:
+    - docker
+  before_script:
+    - apk add --no-cache curl jq unzip
+  script:
+    - echo "🔍 Analizando reportes de seguridad..."
+    - rm -rf reports/* || true
+    - mkdir -p reports
+    - |
+      # Obtener IDs de jobs del pipeline actual
+      PIPELINE_JOBS=$(curl -s -H "PRIVATE-TOKEN: ${CI_JOB_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/pipelines/${CI_PIPELINE_ID}/jobs")
+      
+      for job in bandit-scan safety-scan gitleaks-scan trivy-scan zap-scan; do
+        echo "📥 Descargando artifacts de $job..."
+        
+        # Obtener el job ID del pipeline actual
+        JOB_ID=$(echo "$PIPELINE_JOBS" | jq -r ".[] | select(.name == \"$job\") | .id" | head -1)
+        
+        if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+          echo "⚠️ Job $job no encontrado en este pipeline"
+          continue
+        fi
+        
+        echo "  Job ID: $JOB_ID"
+        
+        # Descargar artifacts del job específico
+        curl -f -H "PRIVATE-TOKEN: ${CI_JOB_TOKEN}" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/jobs/${JOB_ID}/artifacts" \
+          -o "reports/${job}.zip" || echo "⚠️ No se pudo descargar $job"
+        
+        if [ -f "reports/${job}.zip" ]; then
+          unzip -o "reports/${job}.zip" -d reports/ || true
+          rm "reports/${job}.zip"
+        fi
+      done
+    - echo "📊 Analizando reportes..."
+    - ls -lh reports/ || true
+    - |
+      CRITICAL=0
+      HIGH=0
+      echo ""
+      echo "🔍 Analizando GitLeaks..."
+      if [ -f "reports/gitleaks-report.json" ]; then
+        echo "Contenido del archivo:"
+        cat reports/gitleaks-report.json
+        echo ""
+        COUNT=$(jq 'length' reports/gitleaks-report.json 2>/dev/null || echo "0")
+        echo "COUNT detectado: $COUNT"
+        if [ "$COUNT" -gt 0 ]; then
+          CRITICAL=$((CRITICAL + COUNT))
+          echo "🔴 GitLeaks: $COUNT secrets encontrados"
+        fi
+      fi
+      echo ""
+      echo "🔍 Analizando Bandit..."
+      if [ -f "reports/bandit-report.json" ]; then
+        HIGH_COUNT=$(jq '[.results[] | select(.issue_severity == "HIGH")] | length' reports/bandit-report.json 2>/dev/null || echo "0")
+        HIGH=$((HIGH + HIGH_COUNT))
+        echo "HIGH_COUNT detectado: $HIGH_COUNT"
+      fi
+      echo ""
+      echo "📊 Resumen:"
+      echo "   🔴 Crítico: $CRITICAL"
+      echo "   🟠 Alto: $HIGH"
+      if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+        echo ""
+        echo "❌ Security gate FAILED"
+        exit 1
+      fi
+      echo ""
+      echo "✅ Security gate PASSED"
+    - echo "✅ Notificando a n8n..."
+    - |
+      if [ -n "$N8N_WEBHOOK_URL" ]; then
+        curl -X POST "$N8N_WEBHOOK_URL" \
+          -H "Content-Type: application/json" \
+          -d "{\"event_type\":\"security_passed\",\"project_name\":\"$CI_PROJECT_NAME\",\"commit_sha\":\"$CI_COMMIT_SHORT_SHA\",\"commit_author\":\"$GITLAB_USER_NAME\",\"pipeline_id\":$CI_PIPELINE_ID,\"pipeline_url\":\"$CI_PIPELINE_URL\"}" \
+          && echo "✅ Notificación enviada" \
+          || echo "⚠️ Error al notificar"
+      else
+        echo "⚠️ N8N_WEBHOOK_URL no configurada"
+      fi
+    - echo "🎉 Security gate completed"
+  allow_failure: false
+
+# ====================================================================
+# DELIVERY PRD: Despliegue MANUAL a producción
+# ====================================================================
+deploy-prd:
+  stage: delivery-prd
+  image: alpine/k8s:1.28.3
+  tags:
+    - docker
+  needs:
+    - job: security-gate
+      optional: false  # Requiere que el gate pase
+  before_script:
+    - mkdir -p ~/.kube
+    - echo "$KUBECONFIG_CONTENT" > ~/.kube/config
+    - export KUBECONFIG=~/.kube/config
+  script:
+    - |
+      set -euo pipefail
+      IMAGE_TAG="safernandez666/python-application:${CI_COMMIT_SHA:0:8}"
+      NAMESPACE="production"
+      
+      echo "🚀 Deploying to PRODUCTION (k3s namespace: $NAMESPACE)"
+      
+      # Crear namespace si no existe
+      kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+      
+      # Aplicar manifiestos
+      kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -n $NAMESPACE
+      kubectl apply -f k8s/cloudflare-tunnel-prd.yaml -n $NAMESPACE
+      
+      # Actualizar imagen
+      kubectl set image deployment/flask-app \
+        flask-app=$IMAGE_TAG \
+        --namespace=$NAMESPACE \
+        --record=false
+      
+      # Esperar rollout
+      kubectl rollout status deployment/flask-app --namespace=$NAMESPACE --timeout=5m
+      
+      # Reiniciar túnel de Cloudflare
+      kubectl rollout restart deployment/cloudflared-prd --namespace=$NAMESPACE
+      kubectl rollout status deployment/cloudflared-prd --namespace=$NAMESPACE --timeout=2m
+      
+      echo "✅ PRD deployment successful!"
+      echo "🌍 Production app: https://app-prd.esprueba.com"
+  environment:
+    name: production
+    url: https://app-prd.esprueba.com
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual  # Requiere aprobación manual
