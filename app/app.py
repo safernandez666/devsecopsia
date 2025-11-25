@@ -5,7 +5,7 @@ import socket
 
 app = Flask(__name__)
 
-# Variables de entorno de GitLab CI
+# Variables de entorno de GitLab CI para Creacion de Imagen
 BUILD_VERSION = os.getenv('CI_COMMIT_SHORT_SHA', 'dev')
 COMMIT_SHA = os.getenv('CI_COMMIT_SHA', 'local')
 PIPELINE_ID = os.getenv('CI_PIPELINE_ID', 'N/A')
@@ -16,13 +16,14 @@ COMMIT_AUTHOR = os.getenv('CI_COMMIT_AUTHOR', 'Developer')
 DEPLOYED_AT = datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')
 HOSTNAME = socket.gethostname()
 
+
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pipeline - DevSecOps</title>
+    <title>Pipeline - DevSecOps - Complete</title>
     <style>
         * {
             margin: 0;
@@ -201,7 +202,7 @@ HTML_TEMPLATE = '''
 <body>
     <div class="container">
         <div class="header">
-            <h1>🚀 Python App</h1>
+            <h1>🚀 Python App Main</h1>
             <p class="subtitle">DevSecOps Pipeline</p>
             <span class="status-badge">✓ Running</span>
         </div>
@@ -301,8 +302,8 @@ def info():
     }), 200
 
 if __name__ == '__main__':
-    # Tomar host y port de variables de entorno, por defecto usar loopback
-    host = os.getenv("FLASK_RUN_HOST", "127.0.0.1")
+    # Test 
+    host = os.getenv("FLASK_RUN_HOST", "127.0.0.1")  
     port = int(os.getenv("FLASK_RUN_PORT", "5000"))
 
     app.run(host=host, port=port, debug=False)

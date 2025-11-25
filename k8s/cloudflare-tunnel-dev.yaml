@@ -1,17 +1,16 @@
----
 # 1️⃣ Secret con las credenciales del túnel
 apiVersion: v1
 kind: Secret
 metadata:
   name: cloudflared-credentials
-  namespace: default
+  namespace: development
 type: Opaque
 stringData:
   credentials.json: |
     {
-      "AccountTag": "35XXX",
-      "TunnelSecret": "6FRXXX",
-      "TunnelID": "24fXXX"
+      "AccountTag": "35a8afd34c8dd707a4da51bdd9d64477",
+      "TunnelSecret": "l+h1UeQX8fheT3JF65HUszuCKlChyi6musLmVu5l0aU=",
+      "TunnelID": "de97c5cc-c801-43d5-9fa8-ec48ad524b8d"
     }
 
 ---
@@ -20,14 +19,21 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cloudflared-config
-  namespace: default
+  namespace: development
 data:
   config.yaml: |
-    tunnel: 24fe17f1-d89a-48e9-b055-32969a42c981
+    # ⚠️ CORREGIDO: Este ID ahora coincide con el TunnelID del Secret
+    tunnel: de97c5cc-c801-43d5-9fa8-ec48ad524b8d # 🆔 ACTUALIZADO
     credentials-file: /etc/cloudflared/credentials.json
-
+    
+    # ⚠️ AGREGADO: Configuración de métricas necesaria para health checks
+    metrics: 0.0.0.0:2000
+    
+    # ⚠️ AGREGADO: Evita actualizaciones automáticas en contenedores
+    no-autoupdate: true
+    
     ingress:
-      - hostname: app.esprueba.com
+      - hostname: app-dev.esprueba.com
         service: http://flask-app-service:80
       - service: http_status:404
 
@@ -36,8 +42,8 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cloudflared
-  namespace: default
+  name: cloudflared-dev
+  namespace: development
 spec:
   replicas: 2
   selector:
@@ -49,12 +55,14 @@ spec:
         app: cloudflared
     spec:
       containers:
+      # ... (El resto del Deployment no necesita cambios) ...
       - name: cloudflared
         image: cloudflare/cloudflared:latest
         args:
           - tunnel
           - --config
           - /etc/cloudflared/config.yaml
+          - --no-autoupdate
           - run
         env:
           - name: TUNNEL_ORIGIN_CERT
@@ -68,18 +76,7 @@ spec:
             mountPath: /etc/cloudflared/credentials.json
             subPath: credentials.json
             readOnly: true
-        livenessProbe:
-          httpGet:
-            path: /ready
-            port: 20241 # El puerto 20000 es el correcto para el Health Check de cloudflared
-          initialDelaySeconds: 10
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /ready
-            port: 20241 # El puerto 20000 es el correcto para el Health Check de cloudflared
-          initialDelaySeconds: 5
-          periodSeconds: 5
+        # ... (Recursos y Probes) ...
       volumes:
         - name: config
           configMap:

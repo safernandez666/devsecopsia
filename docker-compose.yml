@@ -9,7 +9,7 @@ services:
       GITLAB_OMNIBUS_CONFIG: |
         external_url 'http://localhost:8000'
         nginx['listen_port'] = 8000    
-        
+
         # new changes for enabling container registry
         gitlab_rails['registry_enabled'] = true
 
@@ -106,7 +106,7 @@ services:
       resources:
         limits:
           memory: 256M
-# DefectDojo - Security Vulnerability Management
+  # DefectDojo - Security Vulnerability Management
   defectdojo-nginx:
     image: defectdojo/defectdojo-nginx:latest
     container_name: defectdojo-nginx
@@ -133,7 +133,7 @@ services:
   celerybeat:
     image: defectdojo/defectdojo-django:latest
     container_name: defectdojo-celerybeat
-    command: ["/wait-for-it.sh", "postgres-defectdojo:5432", "--", "/app/docker/entrypoint-celery-beat.sh"]
+    command: [ "/wait-for-it.sh", "postgres-defectdojo:5432", "--", "/app/docker/entrypoint-celery-beat.sh" ]
     environment:
       DD_DATABASE_URL: postgresql://defectdojo:defectdojo@postgres-defectdojo:5432/defectdojo
       DD_SECRET_KEY: ChangeMe123SecretKey456
@@ -145,7 +145,7 @@ services:
   celeryworker:
     image: defectdojo/defectdojo-django:latest
     container_name: defectdojo-celeryworker
-    command: ["/wait-for-it.sh", "postgres-defectdojo:5432", "--", "/app/docker/entrypoint-celery-worker.sh"]
+    command: [ "/wait-for-it.sh", "postgres-defectdojo:5432", "--", "/app/docker/entrypoint-celery-worker.sh" ]
     environment:
       DD_DATABASE_URL: postgresql://defectdojo:defectdojo@postgres-defectdojo:5432/defectdojo
       DD_SECRET_KEY: ChangeMe123SecretKey456
@@ -182,13 +182,13 @@ services:
       - k3s-server:/var/lib/rancher/k3s
       - ./k3s-kubeconfig:/output
     ports:
-      - "6443:6443"   # API Server
-      - "8888:80"     # HTTP Ingress
-      - "8889:443"    # HTTPS Ingress
+      - "6443:6443" # API Server
+      - "8888:80" # HTTP Ingress
+      - "8889:443" # HTTPS Ingress
     tmpfs:
       - /run
       - /var/run
-    command: 
+    command:
       - server
       - --disable=traefik
       - --write-kubeconfig-mode=644
@@ -205,3 +205,6 @@ volumes:
   postgres-data:
   defectdojo-data:
   k3s-server:
+  dast_reports:
+
+

@@ -8,7 +8,7 @@ ARG CI_COMMIT_SHA=local
 ARG CI_PIPELINE_ID=N/A
 ARG CI_PIPELINE_URL=#
 ARG CI_JOB_ID=N/A
-ARG CI_COMMIT_MESSAGE="Local build"
+ARG CI_COMMIT_MESSAGE="Local build Mac"
 ARG CI_COMMIT_AUTHOR="Developer"
 
 ENV CI_COMMIT_SHORT_SHA=${CI_COMMIT_SHORT_SHA} \
@@ -26,4 +26,5 @@ COPY app.py .
 
 EXPOSE 5000
 
-CMD ["python", "app.py"]
+# ⭐ Usar Gunicorn en vez de Flask dev server
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "app:app"]

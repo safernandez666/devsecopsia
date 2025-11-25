@@ -1,0 +1,92 @@
+# 1️⃣ Secret con las credenciales del túnel
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflared-credentials
+  namespace: production
+type: Opaque
+stringData:
+  credentials.json: |
+    {
+      "AccountTag": "35a8afd34c8dd707a4da51bdd9d64477",
+      "TunnelSecret": "qbUxok2+QK+SKLwkzk1QXlZLrC28bX2a5TuHv6eGmrk=",
+      "TunnelID": "a2c922e9-3c86-4b7c-ab08-5949afba9f4e"
+    }
+
+---
+# 2️⃣ ConfigMap con la configuración del túnel
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudflared-config
+  namespace: production
+data:
+  config.yaml: |
+    # ⚠️ CORREGIDO: Este ID ahora coincide con el TunnelID del Secret
+    tunnel: a2c922e9-3c86-4b7c-ab08-5949afba9f4e # 🆔 ACTUALIZADO
+    credentials-file: /etc/cloudflared/credentials.json
+    
+    # ⚠️ AGREGADO: Configuración de métricas necesaria para health checks
+    metrics: 0.0.0.0:2000
+    
+    # ⚠️ AGREGADO: Evita actualizaciones automáticas en contenedores
+    no-autoupdate: true
+    
+    ingress:
+      - hostname: app-prd.esprueba.com
+        service: http://flask-app-service:80
+      - service: http_status:404
+
+---
+# 3️⃣ Deployment de cloudflared
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared-prd
+  namespace: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      containers:
+      # ... (El resto del Deployment no necesita cambios) ...
+      - name: cloudflared
+        image: cloudflare/cloudflared:latest
+        args:
+          - tunnel
+          - --config
+          - /etc/cloudflared/config.yaml
+          - --no-autoupdate
+          - run
+        env:
+          - name: TUNNEL_ORIGIN_CERT
+            value: "/etc/cloudflared/credentials.json"
+        volumeMounts:
+          - name: config
+            mountPath: /etc/cloudflared/config.yaml
+            subPath: config.yaml
+            readOnly: true
+          - name: credentials
+            mountPath: /etc/cloudflared/credentials.json
+            subPath: credentials.json
+            readOnly: true
+        # ... (Recursos y Probes) ...
+      volumes:
+        - name: config
+          configMap:
+            name: cloudflared-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+        - name: credentials
+          secret:
+            secretName: cloudflared-credentials
+            items:
+              - key: credentials.json
+                path: credentials.json

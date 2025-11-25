@@ -7,11 +7,10 @@ shutdown_timeout = 0
 
 [[runners]]
   name = "docker-desktop"
-  url = "http://host.docker.internal:8000"
-  clone_url = "http://host.docker.internal:8000"
+  url = "http://localhost:8000"
   id = 1
-  token = "glrt-TUTOKEN"
-  token_obtained_at = 2025-11-16T21:35:54Z
+  token = "glrt-XXXXX"
+  token_obtained_at = 2025-11-22T02:11:58Z
   token_expires_at = 0001-01-01T00:00:00Z
   executor = "docker"
   [runners.cache]
