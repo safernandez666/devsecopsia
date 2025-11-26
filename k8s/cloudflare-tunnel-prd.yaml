@@ -8,9 +8,9 @@ type: Opaque
 stringData:
   credentials.json: |
     {
-      "AccountTag": "35a8afd34c8dd707a4da51bdd9d64477",
-      "TunnelSecret": "qbUxok2+QK+SKLwkzk1QXlZLrC28bX2a5TuHv6eGmrk=",
-      "TunnelID": "a2c922e9-3c86-4b7c-ab08-5949afba9f4e"
+      "AccountTag": "XXX",
+      "TunnelSecret": "XXX",
+      "TunnelID": "XXX"
     }
 
 ---
